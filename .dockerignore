@@ -1,0 +1,78 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Secrets / environment ---
+dev.env
+.env
+*.env.local
+
+# --- VCS / IDE / OS ---
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
+
+# --- Heavy mounted-at-runtime data (provided via volumes in docker-compose) ---
+**/chrome_profile/
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+
+# --- Offline tuning / training code (not used by the API runtime) ---
+MultiagentSystem/agents_tuners/
+
+# --- Build artefacts / runtime logs not needed in image ---
+**/*.log
+**/*.log.*
+MultiagentSystem/predictions_results*.csv
+MultiagentSystem/confusion_matrix.png
+Logs/available_features.json
+
+# --- Pre-computed agent output artefacts (overwritten at runtime) ---
+MultiagentSystem/agents/news_analyser/news_archive.json
+MultiagentSystem/agents/news_analyser/news_predict.json
+MultiagentSystem/agents/economic_calendar_analyser/calendar_predict.json
+MultiagentSystem/agents/onchain_indicators/input_data.json
+MultiagentSystem/agents/onchain_indicators/onchain_predict.json
+MultiagentSystem/agents/tech_indicators/input_data.json
+MultiagentSystem/agents/tech_indicators/input_data.csv
+MultiagentSystem/agents/tech_indicators/tech_predict.json
+MultiagentSystem/agents/tech_indicators/message_to_bot.csv
+MultiagentSystem/agents/tech_indicators/set_1_horizon1.txt
+MultiagentSystem/agents/unbias_agent/unbias_signals_long.csv
+MultiagentSystem/agents/unbias_agent/unbias_signals_wide.csv
+MultiagentSystem/agents/unbias_agent/unbias_dataset_h*.csv
+
+# --- Notebooks and analysis-only assets ---
+Risk_management_calculation/
+**/*.ipynb
+.ipynb_checkpoints/
+
+# --- Docs (not needed at runtime) ---
+README.md
+HOW_TO_USE_MULTIAGENT_ENDPOINTS_GUIDE.md
+indicators_cheatsheet.md
+
+# --- Tests (not needed at runtime) ---
+**/tests/
+
+# --- Docker meta ---
+Dockerfile
+.dockerignore
+docker-compose.yml

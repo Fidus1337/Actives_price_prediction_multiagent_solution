@@ -1,0 +1,26 @@
+# =========================================================
+# Запуск на Windows (из папки D:\container_for_proj\):
+#   cd D:\container_for_proj
+#   docker compose up -d
+#
+# Запуск на Linux (из папки с данными):
+#   cd /home/ubuntu/container_for_proj
+#   docker compose up -d
+#
+# Рядом с этим файлом должны лежать:
+#   dev.env, news_archive.db, calendar_archive.db,
+#   twitter_archive.db, chrome_profile/
+# =========================================================
+
+services:
+  btc-predictor:
+    image: danilacrazy1337/multiagent_system:v1.0
+    env_file: ./dev.env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./news_archive.db:/app/MultiagentSystem/agents/news_analyser/news_archive.db
+      - ./calendar_archive.db:/app/MultiagentSystem/agents/economic_calendar_analyser/calendar_archive.db
+      - ./twitter_archive.db:/app/MultiagentSystem/agents/twitter_analyser/twitter_archive.db
+      - ./chrome_profile:/app/MultiagentSystem/agents/twitter_analyser/twitter_scrapper/chrome_profile
+    restart: unless-stopped
