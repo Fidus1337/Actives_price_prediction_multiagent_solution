@@ -26,6 +26,7 @@ from api.schemas import (
     MultiagentPredictionsResponse,
     MultiagentSinglePrediction,
     AgentPredictionDetail,
+    PredictionMetrics,
     CollectAgentDataRequest,
     CollectAgentDataResponse,
     CollectAgentDataResult,
@@ -41,6 +42,27 @@ _BOOL_PRED_MAP = {True: 1, False: 0}
 
 def _agent_short_name(agent_name: str) -> str:
     return agent_name.replace("agent_for_", "").replace("agent_for_analysing_", "")
+
+
+def _compute_metrics(predictions: list[MultiagentSinglePrediction]) -> PredictionMetrics:
+    tp = tn = fp = fn = 0
+    for p in predictions:
+        if p.y_true is None or p.y_prediction is None:
+            continue
+        if   p.y_prediction == 1 and p.y_true == 1: tp += 1
+        elif p.y_prediction == 0 and p.y_true == 0: tn += 1
+        elif p.y_prediction == 1 and p.y_true == 0: fp += 1
+        elif p.y_prediction == 0 and p.y_true == 1: fn += 1
+    evaluable = tp + tn + fp + fn
+    accuracy  = (tp + tn) / evaluable if evaluable        else None
+    precision = tp / (tp + fp)        if (tp + fp)        else None
+    recall    = tp / (tp + fn)        if (tp + fn)        else None
+    return PredictionMetrics(
+        evaluable_dates=evaluable,
+        skipped_dates=len(predictions) - evaluable,
+        tp=tp, tn=tn, fp=fp, fn=fn,
+        accuracy=accuracy, precision=precision, recall=recall,
+    )
 
 
 router = APIRouter(prefix="/api", tags=["multiagent_predictions"])
@@ -117,9 +139,12 @@ async def multiagent_predictions(request: MultiagentPredictionsRequest) -> Multi
             short = _agent_short_name(agent_name)
             raw_pred = row.get(f"{short}__prediction")
             pred_int = _BOOL_PRED_MAP.get(raw_pred) if raw_pred in (True, False) else None
+            raw_avg_score = row.get(f"{short}__avg_score")
+            avg_score = float(raw_avg_score) if raw_avg_score is not None and pd.notna(raw_avg_score) else None
             agents_block[agent_name] = AgentPredictionDetail(
                 prediction=pred_int,
                 confidence=row.get(f"{short}__confidence"),
+                avg_score=avg_score,
                 summary=row.get(f"{short}__summary"),
                 reasoning=row.get(f"{short}__reasoning"),
                 risks=row.get(f"{short}__risks"),
@@ -142,6 +167,7 @@ async def multiagent_predictions(request: MultiagentPredictionsRequest) -> Multi
         requested_n_last_dates=request.n_last_dates,
         rows_returned=len(predictions),
         predictions=predictions,
+        metrics=_compute_metrics(predictions),
     )
 
 

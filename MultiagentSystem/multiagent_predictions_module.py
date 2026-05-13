@@ -41,11 +41,12 @@ def make_one_prediction(
         "risks": final_state.get("general_reports_risks"),
     }
 
-    # Flatten per-agent signals into columns: prediction, confidence, reasoning, summary, risks
+    # Flatten per-agent signals into columns: prediction, confidence, avg_score, reasoning, summary, risks
     for agent_name, signal in (final_state.get("agent_signals") or {}).items():
         short = agent_name.replace("agent_for_", "").replace("agent_for_analysing_", "")
         row[f"{short}__prediction"] = signal.get("prediction")
         row[f"{short}__confidence"] = signal.get("confidence")
+        row[f"{short}__avg_score"] = signal.get("avg_score")
         row[f"{short}__reasoning"] = signal.get("reasoning")
         row[f"{short}__summary"] = signal.get("summary")
         row[f"{short}__risks"] = signal.get("risks")

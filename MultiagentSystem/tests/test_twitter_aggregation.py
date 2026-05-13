@@ -274,7 +274,8 @@ class TestMergeDateSignalsIntoFinalVerdict(unittest.TestCase):
         self.assertAlmostEqual(result["avg_score"], 2.0)
 
     def test_two_opposite_days_fresh_zone_balance(self):
-        # +3 and -3 with same weight → avg = 0 → returns None
+        # +3 and -3 with same weight → avg = 0 → weak verdict (signal_type=None,
+        # signal_confidence=0), avg_score still surfaced for downstream visibility.
         signals = {
             "2026-04-26": {"signal_type": "BULL", "signal_confidence": 3, "avg_score": 3.0, "authors_count": 1},
             "2026-04-25": {"signal_type": "BEAR", "signal_confidence": 3, "avg_score": -3.0, "authors_count": 1},
@@ -283,7 +284,11 @@ class TestMergeDateSignalsIntoFinalVerdict(unittest.TestCase):
             signals, decay_rate=0.0, decay_start_day=10, initial_weight=1.0,
             reference_date="2026-04-26",
         )
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertIsNone(result["signal_type"])
+        self.assertEqual(result["signal_confidence"], 0)
+        self.assertAlmostEqual(result["avg_score"], 0.0)
+        self.assertEqual(result["dates_count"], 2)
 
     def test_decay_reduces_old_day_influence(self):
         # Today: +1 (BULL, weight 1.0); 14 days ago: +3 (BULL but heavily decayed)
@@ -305,8 +310,10 @@ class TestMergeDateSignalsIntoFinalVerdict(unittest.TestCase):
         self.assertAlmostEqual(result["avg_score"], round(expected_avg, 3), places=3)
         self.assertEqual(result["dates_count"], 2)
 
-    def test_zero_avg_returns_none(self):
-        # Build signals that exactly cancel
+    def test_zero_avg_returns_weak_verdict(self):
+        # Build signals that exactly cancel — function still returns a dict so
+        # avg_score is observable downstream, but signal_type is None and
+        # signal_confidence is 0 (no vote contributed to general forecast).
         signals = {
             "2026-04-26": {"signal_type": "BULL", "signal_confidence": 2, "avg_score": 2.0, "authors_count": 1},
             "2026-04-25": {"signal_type": "BEAR", "signal_confidence": 2, "avg_score": -2.0, "authors_count": 1},
@@ -315,7 +322,11 @@ class TestMergeDateSignalsIntoFinalVerdict(unittest.TestCase):
             signals, decay_rate=0.0, decay_start_day=10, initial_weight=1.0,
             reference_date="2026-04-26",
         )
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertIsNone(result["signal_type"])
+        self.assertEqual(result["signal_confidence"], 0)
+        self.assertAlmostEqual(result["avg_score"], 0.0)
+        self.assertEqual(result["dates_count"], 2)
 
     def test_invalid_date_string_skipped(self):
         signals = {

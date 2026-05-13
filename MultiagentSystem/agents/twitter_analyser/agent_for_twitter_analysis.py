@@ -163,11 +163,13 @@ def _merge_date_signals_into_final_verdict(
     - BEAR date → -signal_confidence * weight
     - Weighted average of signed scores
     - round(abs(avg)) → final int confidence
-    - If confidence == 0 or no signals → returns None
+    - If confidence == 0 → signal_type is None (too weak to vote), avg_score still reported
+    - If no valid dates / total_weight == 0 → returns None
 
     Returns:
         {"signal_type": "BULL", "signal_confidence": 2, "avg_score": 1.5, "dates_count": 7}
-        or None if no actionable signal
+        {"signal_type": None,   "signal_confidence": 0, "avg_score": 0.3, "dates_count": 3}  # weak
+        or None if no valid dates at all
     """
     if not date_signals:
         return None
@@ -211,10 +213,12 @@ def _merge_date_signals_into_final_verdict(
     signal_confidence = round(abs(avg))
 
     if signal_confidence == 0:
-        return None
+        signal_type = None
+    else:
+        signal_type = "BULL" if avg > 0 else "BEAR"
 
     return {
-        "signal_type": "BULL" if avg > 0 else "BEAR",
+        "signal_type": signal_type,
         "signal_confidence": signal_confidence,
         "avg_score": round(avg, 3),
         "dates_count": len(weighted_scores),
@@ -285,11 +289,30 @@ def agent_for_twitter_analysis(state: AgentState):
 
     if verdict is None:
         return {"agent_signals": {AGENT_NAME: {
-            "reasoning": "Twitter agent system has too weak signals to produce a directional verdict.",
-            "summary": "Twitter signals too weak — abstaining from voting.",
+            "reasoning": "Twitter agent system has no actionable signals in the window.",
+            "summary": "No twitter signals in window — abstaining from voting.",
             "risks": "",
             "prediction": None,
             "confidence": None,
+            "avg_score": None,
+            "description_of_the_reports_problem": [],
+        }}}
+
+    if verdict["signal_type"] is None:
+        return {"agent_signals": {AGENT_NAME: {
+            "reasoning": (
+                f"Aggregated twitter signals across window: "
+                f"avg_score={verdict['avg_score']}, dates_count={verdict['dates_count']}. "
+                f"abs(avg_score) < 0.5 — too weak to vote in the general forecast."
+            ),
+            "summary": (
+                f"Twitter signal too weak | avg_score={verdict['avg_score']} "
+                f"over {verdict['dates_count']} days — abstaining from voting."
+            ),
+            "risks": "",
+            "prediction": None,
+            "confidence": None,
+            "avg_score": verdict["avg_score"],
             "description_of_the_reports_problem": [],
         }}}
 
@@ -299,6 +322,7 @@ def agent_for_twitter_analysis(state: AgentState):
     return {"agent_signals": {AGENT_NAME: {
     "prediction": is_bullish,                          # bool: True=BULL / False=BEAR
     "confidence": confidence,                          # str: "high" / "medium" / "low"
+    "avg_score": verdict["avg_score"],
     "summary": (
         f"{verdict['signal_type']} signal over {verdict['dates_count']} days "
         f"| avg_score={verdict['avg_score']} | confidence={confidence}"

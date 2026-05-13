@@ -3,7 +3,7 @@ from typing import List, Literal, Union, Annotated
 
 import pandas as pd
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 # Reducer для agent_signals — мержит словари по ключу
@@ -31,6 +31,10 @@ class AgentSignal(TypedDict):
     risks: str        # contrarguments about end prediction
     prediction: bool  # True(up)/False(down)
     confidence: str   # high / medium / low
+    # Optional: agents may report a raw weighted score for the window
+    # (e.g. twitter agent — sign indicates direction, |score| strength).
+    # Populated regardless of whether the agent voted in the general forecast.
+    avg_score: NotRequired[float | None]
 
 class AgentRetry(TypedDict):
     agent_name: str
