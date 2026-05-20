@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from MultiagentSystem.dataset_pipeline.FeaturesGetterModule.FeaturesGetter import FeaturesGetter
@@ -77,17 +78,19 @@ class SharedBaseDataCache:
         print(f"SharedBaseDataCache: Refreshed. Shape: {self._base_df.shape}")
 
     @staticmethod
-    def _trim_to_longest_continuous_segment(df: pd.DataFrame) -> pd.DataFrame:
+    def _trim_to_latest_continuous_segment(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Find the longest run of consecutive calendar days and return only that segment.
-        Drops rows that belong to shorter segments separated by date gaps.
+        Return the most recent contiguous-by-calendar-day segment.
+        Drops all earlier segments separated from the latest one by date gaps.
         """
         dates = pd.to_datetime(df["date"]).sort_values()
         diffs = dates.diff()
         is_gap = diffs > pd.Timedelta(days=1)
         group_id = is_gap.cumsum()
-        largest_group = group_id.value_counts().idxmax()
-        mask = group_id == largest_group
+        # group_id grows on each gap; the last value corresponds to the most
+        # recent contiguous run, which is what we want to keep regardless of length.
+        latest_group = group_id.iloc[-1]
+        mask = group_id == latest_group
 
         trimmed = df.loc[mask].reset_index(drop=True)
 
@@ -103,27 +106,6 @@ class SharedBaseDataCache:
 
         return trimmed
 
-    # Columns with too many NaN (data starts much later than other sources)
-    _SPARSE_COLUMNS = [
-        # Orderbook: ~337 NaN out of 1000 rows
-        'futures_orderbook_aggregated_ask_bids_history__aggregated_asks_usd',
-        'futures_orderbook_aggregated_ask_bids_history__aggregated_bids_usd',
-        'futures_orderbook_aggregated_ask_bids_history__aggregated_bids_quantity',
-        'futures_orderbook_ask_bids_history__asks_quantity',
-        'futures_orderbook_ask_bids_history__asks_usd',
-        'futures_orderbook_ask_bids_history__bids_quantity',
-        'futures_orderbook_ask_bids_history__bids_usd',
-        'futures_orderbook_aggregated_ask_bids_history__aggregated_asks_quantity',
-        # CGDI index: ~222 NaN
-        'cgdi_dev_from_base',
-        'cgdi_log_level',
-        'cgdi_index_value',
-        'cgdi_dev_softsign',
-    ]
-
-    _DATE_WINDOW_DAYS = 1000
-    _LAG_PERIODS = [1, 3, 5, 7, 15]
-
     def _fetch_base_data(self) -> pd.DataFrame:
         """
         Execute shared pipeline (identical for all models).
@@ -133,11 +115,34 @@ class SharedBaseDataCache:
         3. ffill()
         4. Date filter (last _DATE_WINDOW_DAYS days)
         5. Drop sparse columns + re-ffill + dropna
-        6. add_engineered_features()  -> diff1, pct1, imbalances
+        6. add_diff_pct_features() + add_imbalance_features() +
+           add_spot_microstructure_features() + add_futures_cross_features()
         7. add_ta_features_selected() x4  -> 8 TA indicators per asset
         8. Add lag features (1, 3, 5, 7, 15 days) for base columns
-        9. _trim_to_longest_continuous_segment()
+        9. _trim_to_latest_continuous_segment()
         """
+        
+        # Columns with too many NaN (data starts much later than other sources)
+        _COLUMNS_TO_DELETE = [
+            # Orderbook: ~337 NaN out of 1000 rows
+            'futures_orderbook_aggregated_ask_bids_history__aggregated_asks_usd',
+            'futures_orderbook_aggregated_ask_bids_history__aggregated_bids_usd',
+            'futures_orderbook_aggregated_ask_bids_history__aggregated_bids_quantity',
+            'futures_orderbook_ask_bids_history__asks_quantity',
+            'futures_orderbook_ask_bids_history__asks_usd',
+            'futures_orderbook_ask_bids_history__bids_quantity',
+            'futures_orderbook_ask_bids_history__bids_usd',
+            'futures_orderbook_aggregated_ask_bids_history__aggregated_asks_quantity',
+            # CGDI index: ~222 NaN
+            'cgdi_dev_from_base',
+            'cgdi_log_level',
+            'cgdi_index_value',
+            'cgdi_dev_softsign',
+        ]
+
+        _DATE_WINDOW_DAYS = 1000
+        _LAG_PERIODS = [1, 3, 5, 7, 15]
+        
         # 1. Raw data
         print("SharedBaseDataCache: Fetching features from API...")
         dfs = get_features(self._getter, self._api_key)
@@ -154,50 +159,74 @@ class SharedBaseDataCache:
 
         # 4. Date filter
         df['date'] = pd.to_datetime(df['date'])
-        cutoff = df['date'].max() - pd.Timedelta(days=self._DATE_WINDOW_DAYS)
+        cutoff = df['date'].max() - pd.Timedelta(days=_DATE_WINDOW_DAYS)
         df = df[df['date'] >= cutoff]
 
-        # 5. Drop sparse columns + clean up remaining NaN
-        cols_to_drop = [c for c in self._SPARSE_COLUMNS if c in df.columns]
+        # 5. Drop non-needed columns + clean up remaining NaN
+        cols_to_drop = [c for c in _COLUMNS_TO_DELETE if c in df.columns]
         df = df.drop(columns=cols_to_drop)
         feature_cols = [c for c in df.columns if c != "date"]
         df[feature_cols] = pd.DataFrame(df[feature_cols]).ffill()
         df = pd.DataFrame(df.dropna())
 
-        # 6. Engineered features (diff1, pct1, imbalances)
-        df = self._features_engineer.add_engineered_features(df)
+        # 6. Engineered features (split into 4 logical groups for readability).
+        #    Order matters: diff/pct must run first so it sees only raw columns
+        #    and does NOT create __diff1/__pct1 over the feat__* columns added below.
+
+        # 6a. Generic diff1 / pct1 over every numeric column (~2x column count).
+        #     Captures day-over-day change and relative change for each raw series.
+        #     pct_change is sanitized: inf (0 -> X) and 0/0 NaN are replaced with 0
+        #     to keep weekend/holiday rows usable instead of being dropped later.
+        df = self._features_engineer.add_diff_pct_features(df, exclude_cols={"date"})
+
+        # 6b. 4 imbalance features = (a - b) / (a + b) on paired streams:
+        #     taker buy vs sell volume (v2 + aggregated), long vs short liquidations,
+        #     orderbook bids vs asks. Normalized to [-1, 1] -> directly comparable
+        #     across regimes regardless of absolute volume.
+        df = self._features_engineer.add_imbalance_features(df)
+
+        # 6c. BTC candle anatomy + realized volatility (consumed by tech & onchain agents):
+        #     intraday_range_pct, close_to_high, close_to_low (reversal signals from
+        #     where the bar closed inside its H-L range) + realized_vol 3d/7d
+        #     (rolling std of daily returns -> short-horizon realized volatility).
+        df = self._features_engineer.add_spot_microstructure_features(df)
+
+        # 6d. Cross-stream futures ratios/spreads that can't be expressed as
+        #     single-column diff/pct: OI/spot-volume (leverage vs real flow),
+        #     funding minus OI-weighted funding (where positioning is actually crowded),
+        #     total liquidations + their day-over-day change (market stress proxy).
+        df = self._features_engineer.add_futures_cross_features(df)
+
+        # Any division above can produce +/-inf when denominators ~0; collapse to NaN
+        # so downstream dropna / model code handles them uniformly.
+        df = df.replace([np.inf, -np.inf], np.nan)
 
         # 6.1. Price MA features (SMA 7/14/21/50, relative return, z-score)
         df = self._features_engineer.add_price_ma_features(df)
 
-        # 7. TA indicators (8 per asset: ADX, CCI, RSI, ROC, ATR, BBW, OBV, MFI)
-        df = add_ta_features_selected(df, prefix="gold")
-        df = add_ta_features_selected(df, prefix="sp500")
-        df = add_ta_features_selected(df, prefix="igv")
+        # 7. TA indicators for macro agent (8 per asset: ADX, CCI, RSI, ROC, ATR, BBW, OBV, MFI)
+        # df = add_ta_features_selected(df, prefix="gold")
+        # df = add_ta_features_selected(df, prefix="sp500")
+        # df = add_ta_features_selected(df, prefix="igv")
+        
+        # 8. TA indicators for all agents, based on BTC (8 per asset: ADX, CCI, RSI, ROC, ATR, BBW, OBV, MFI)
         df = add_ta_features_selected(
             df, prefix="spot_price_history",
             volume_col_override="spot_price_history__volume_usd"
         )
 
-        # 8. Lag features for base columns (excluding diff1/pct1 derivatives)
-        base_cols = [
-            c for c in df.columns
-            if c != "date" and "__pct1" not in c and "__diff1" not in c
-        ]
+        # 9. Lag features for base columns (excluding diff1/pct1 derivatives)
         cols_before = df.shape[1]
-        lag_frames = []
-        for lag in self._LAG_PERIODS:
-            lagged = df[base_cols].shift(lag)
-            lagged.columns = [f"{col}__lag{lag}" for col in base_cols]
-            lag_frames.append(lagged)
-        df = pd.concat([df] + lag_frames, axis=1)
-        print(f"SharedBaseDataCache: Added lags {self._LAG_PERIODS}: "
+        df = self._features_engineer.add_lag_features_by_columns_from_dataset(
+            df, lag_periods=_LAG_PERIODS,
+        )
+        print(f"SharedBaseDataCache: Added lags {_LAG_PERIODS}: "
               f"{cols_before} -> {df.shape[1]} columns (+{df.shape[1] - cols_before})")
 
-        # 9. Drop NaN rows first (lag/TA lookbacks), THEN trim to longest segment —
+        # 10. Drop NaN rows first (lag/TA lookbacks), THEN trim to longest segment —
         # otherwise dropna creates gaps that trim can no longer clean up.
         df = df.dropna()
-        df = self._trim_to_longest_continuous_segment(df)
+        df = self._trim_to_latest_continuous_segment(df)
 
         # Save available features list to Logs/
         feature_names = sorted([c for c in df.columns if c != "date"])

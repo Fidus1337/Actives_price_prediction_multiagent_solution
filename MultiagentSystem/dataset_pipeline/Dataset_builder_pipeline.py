@@ -147,6 +147,31 @@ def get_features(getter: FeaturesGetter, API_KEY: str):
 
         ("igv",
          lambda: getter.get_igv_ohlcv(days=1250, prefix="igv")),
+
+        ("btc_mvrv",
+         lambda: getter.get_bitcoin_mvrv(
+             z_window=180, slope_window=14,
+             prefix="index_btc_mvrv")),
+
+        ("btc_sth_sopr",
+         lambda: getter.get_bitcoin_sth_sopr(
+             z_window=30, slope_window=14,
+             prefix="index_btc_sth_sopr")),
+
+        ("btc_lth_sopr",
+         lambda: getter.get_bitcoin_lth_sopr(
+             z_window=180, slope_window=14,
+             prefix="index_btc_lth_sopr")),
+
+        ("btc_nupl",
+         lambda: getter.get_bitcoin_nupl(
+             z_window=180, slope_window=14,
+             prefix="index_btc_nupl")),
+
+        ("btc_puell",
+         lambda: getter.get_puell_multiple(
+             z_window=180, slope_window=14,
+             prefix="index_puell_multiple")),
     ]
 
     results = [None] * len(tasks)
@@ -189,6 +214,11 @@ def get_features(getter: FeaturesGetter, API_KEY: str):
         results[25],  # df_sp500
         results[26],  # df_gold
         results[27],  # df_igv
+        results[28],  # df_mvrv
+        results[29],  # df_sth_sopr
+        results[30],  # df_lth_sopr
+        results[31],  # df_nupl
+        results[32],  # df_puell
     ]
 
 

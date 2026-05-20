@@ -14,6 +14,7 @@ Collects macro calendar events and produces a BTC impact verdict for the forecas
 
 ## Inputs and outputs
 - Input source: calendar API used in `calendar_collector.py`
-- Archive: `calendar_archive.json`
+- Archive (runtime): `calendar_archive.db` (SQLite)
+- Optional legacy source for one-time migration: `calendar_archive.json`
 - Debug output: `calendar_predict.json`
 

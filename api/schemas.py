@@ -10,18 +10,19 @@ class MultiagentPredictionsRequest(BaseModel):
 
     model_config = ConfigDict(json_schema_extra={
         "example": {
-            "forecast_start_date": "2026-04-20",
+            "forecast_start_date": "2026-05-16",
             "horizon": 1,
             "n_last_dates": 1,
             "agent_envolved_in_prediction": [
+                "agent_for_analysing_tech_indicators",
                 "agent_for_twitter_analysis",
-                "agent_for_analysing_tech_indicators"
+                "agent_for_analysing_onchain_indicators"
             ],
             "neutral_threshold": 0.0,
             "agent_settings": {
                 "agent_for_analysing_tech_indicators": {
                     "system_prompt_file": "agents/tech_indicators/system_prompt_general.md",
-                    "llm_model": "gpt-4.1",
+                    "llm_model": "gpt-5-mini",
                     "window_to_analysis": 21,
                     "base_feats": [
                         "spot_price_history__close",
@@ -56,7 +57,7 @@ class MultiagentPredictionsRequest(BaseModel):
                 },
                 "agent_for_economic_calendar_analysis": {
                     "llm_model": "gpt-4.1",
-                    "window_to_analysis": 1
+                    "window_to_analysis": 3
                 },
                 "agent_for_twitter_analysis": {
                     "authors": [
@@ -79,33 +80,24 @@ class MultiagentPredictionsRequest(BaseModel):
                 },
                 "agent_for_analysing_onchain_indicators": {
                     "system_prompt_file": "agents/onchain_indicators/system_prompt_1d.md",
-                    "llm_model": "claude-sonnet-4-5",
+                    "llm_model": "gpt-5-mini",
+                    "reasoning_effort": "medium",
                     "window_to_analysis": 21,
                     "base_feats": [
                         "spot_price_history__open",
                         "spot_price_history__high",
                         "spot_price_history__low",
                         "spot_price_history__close",
-                        "index_btc_lth_supply__lth_supply",
-                        "index_btc_lth_supply__supply_slope14",
-                        "index_btc_lth_supply__supply_z180",
-                        "index_btc_lth_supply__lth_supply__lag3",
-                        "index_btc_lth_supply__lth_supply__lag5",
-                        "index_btc_lth_supply__lth_supply__lag7",
-                        "index_btc_sth_supply__sth_supply",
-                        "index_btc_sth_supply__supply_slope14",
-                        "index_btc_sth_supply__supply_z180",
-                        "index_btc_sth_supply__sth_supply__lag1",
-                        "index_btc_sth_supply__sth_supply__lag3",
-                        "index_btc_sth_supply__sth_supply__lag5",
-                        "index_btc_sth_supply__sth_supply__lag7",
-                        "index_btc_active_addresses__active_address_count",
-                        "index_btc_active_addresses__aa_z180",
-                        "index_btc_active_addresses__aa_slope14",
-                        "index_btc_reserve_risk__reserve_risk_index",
-                        "index_btc_reserve_risk__log_rr",
-                        "index_btc_reserve_risk__rr_z180",
-                        "index_btc_reserve_risk__rr_slope14"
+                        "index_btc_mvrv__mvrv_z180",
+                        "index_btc_mvrv__mvrv_slope14",
+                        "index_btc_sth_sopr__sopr_z30",
+                        "index_btc_sth_sopr__sopr_slope14",
+                        "index_btc_lth_sopr__sopr_z180",
+                        "index_btc_lth_sopr__sopr_slope14",
+                        "index_btc_nupl__nupl_z180",
+                        "index_btc_nupl__nupl_slope14",
+                        "index_puell_multiple__puell_z180",
+                        "index_puell_multiple__puell_slope14"
                     ]
                 }
             }

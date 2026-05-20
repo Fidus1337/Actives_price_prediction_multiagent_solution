@@ -6,7 +6,7 @@ All filtered events (Major all countries + Medium US only) are sent
 to the LLM in a single prompt. The LLM aggregates and returns a verdict.
 
 Flow:
-    calendar_archive → filter → format prompt → LLM → AgentSignal
+    calendar_archive -> filter -> format prompt -> LLM -> AgentSignal
 """
 
 import json
@@ -51,14 +51,29 @@ def _parse_forecast_window(
     return window_start, forecast_end_date, window_end_exclusive
 
 
+def _is_us_event(event: dict) -> bool:
+    code = str(event.get("country_code", "")).upper()
+    if code == "US":
+        return True
+    name = str(event.get("country_name", "")).lower()
+    return "united states" in name or "usa" in name or "u.s." in name
+
+
 def _filter_events_by_importance(events: list[dict]) -> list[dict]:
-    """Major (imp>=3) all countries only.
-    Exclude 'Waiting' and events without published_value."""
+    """
+    Keep:
+      - Major events (importance >= 3) for all countries
+      - Medium events (importance == 2) for US only
+    Exclude:
+      - Waiting events
+      - events without published value
+    """
     filtered = []
     for e in events:
         if not e.get("published_value") or e.get("data_effect") == "Waiting":
             continue
-        if e.get("importance_level", 0) >= 3:
+        imp = int(e.get("importance_level", 0) or 0)
+        if imp >= 3 or (imp == 2 and _is_us_event(e)):
             filtered.append(e)
     return filtered
 
@@ -83,6 +98,22 @@ def _format_event(event: dict) -> str:
 def _format_all_events(events: list[dict]) -> str:
     """Format all events into a single text block."""
     return "\n\n".join(_format_event(e) for e in events)
+
+
+def _event_effect_balance(events: list[dict]) -> tuple[int, int]:
+    """
+    Count bullish vs bearish data_effect labels.
+    Used only as a confidence guardrail (not a directional model).
+    """
+    bullish = 0
+    bearish = 0
+    for e in events:
+        eff = str(e.get("data_effect", "")).strip().lower()
+        if "bull" in eff:
+            bullish += 1
+        elif "bear" in eff:
+            bearish += 1
+    return bullish, bearish
 
 
 def _save_prediction_debug(
@@ -178,7 +209,10 @@ def agent_for_economic_calendar_analysis(state: AgentState):
     print(f"{LOG_TAG} [3/4] Loading events from archive...")
     all_events = get_events_in_range(dt_from=window_start, dt_to=window_end_inclusive)
     filtered = _filter_events_by_importance(all_events)
-    print(f"{LOG_TAG}   Raw: {len(all_events)} events | After filter (Major only): {len(filtered)}")
+    print(
+        f"{LOG_TAG}   Raw: {len(all_events)} events | "
+        f"After filter (Major all + Medium US): {len(filtered)}"
+    )
 
     if filtered:
         from collections import Counter
@@ -237,19 +271,39 @@ def agent_for_economic_calendar_analysis(state: AgentState):
             "description_of_the_reports_problem": [],
         }}}
 
-    if verdict.direction == "bullish":
+    final_direction = verdict.direction
+    final_confidence = verdict.confidence
+
+    # Post-LLM confidence guardrails:
+    # - tiny sample: high confidence is disallowed
+    # - mixed bullish/bearish effect labels: confidence is downgraded
+    # - tiny and strongly conflicting sample: abstain (neutral)
+    bull_cnt, bear_cnt = _event_effect_balance(filtered)
+    conflict = bull_cnt > 0 and bear_cnt > 0
+    if len(filtered) < 3 and final_confidence == "high":
+        final_confidence = "medium"
+    if conflict and final_confidence == "high":
+        final_confidence = "medium"
+    if conflict and len(filtered) <= 2 and abs(bull_cnt - bear_cnt) <= 1:
+        final_direction = "neutral"
+        final_confidence = "low"
+
+    if final_direction == "bullish":
         prediction = True
-        confidence = verdict.confidence
+        confidence = final_confidence
         prediction_label = "HIGHER"
-    elif verdict.direction == "bearish":
+    elif final_direction == "bearish":
         prediction = False
-        confidence = verdict.confidence
+        confidence = final_confidence
         prediction_label = "LOWER"
     else:
         prediction = None
         confidence = None
         prediction_label = "NEUTRAL"
-    print(f"{LOG_TAG} [4/4] Verdict: {verdict.direction} | confidence={verdict.confidence} | → {prediction_label}")
+    print(
+        f"{LOG_TAG} [4/4] Verdict: {verdict.direction}->{final_direction} | "
+        f"confidence={verdict.confidence}->{final_confidence} | -> {prediction_label}"
+    )
     print(f"{LOG_TAG}   Reasoning: {verdict.reasoning}")
 
     # --- Save debug output ---
@@ -259,7 +313,7 @@ def agent_for_economic_calendar_analysis(state: AgentState):
     # --- Build agent signal ---
     summary = (
         f"{len(filtered)} macro events analyzed. "
-        f"LLM verdict: {verdict.direction}, confidence: {verdict.confidence}."
+        f"LLM verdict: {final_direction}, confidence: {final_confidence}."
     )
 
     return {"agent_signals": {AGENT_NAME: {

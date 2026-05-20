@@ -261,23 +261,37 @@ class FeaturesGetter:
         )
         
         s = df["lth_supply"].astype(float)
-        
+
         # Feature 1: pct change over N days (supply expansion/contraction proxy)
         df[f"supply_pct{pct_window}"] = s / s.shift(pct_window) - 1.0
-        
+
         # Feature 2: rolling z-score (regime-normalized supply)
         minp = max(30, z_window // 3)
         roll = s.rolling(z_window, min_periods=minp)
         mu = roll.mean()
         sd = roll.std(ddof=0).replace(0.0, np.nan)
         df[f"supply_z{z_window}"] = (s - mu) / sd
-        
+
+        # Detrended momentum: LTH supply has a structural upward drift (coins
+        # naturally age into LTH). Comparing level vs lag is a constant in
+        # bull/sideways markets. Use z-score of the *change* against its own
+        # rolling distribution to isolate abnormal accumulation/distribution.
+        chg7 = s - s.shift(7)
+        minp7 = max(10, 30 // 3)
+        roll7 = chg7.rolling(30, min_periods=minp7)
+        df["supply_chg7_z30"] = (chg7 - roll7.mean()) / roll7.std(ddof=0).replace(0.0, np.nan)
+
+        chg1 = s.diff(1)
+        minp1 = max(5, 14 // 3)
+        roll1 = chg1.rolling(14, min_periods=minp1)
+        df["supply_chg1_z14"] = (chg1 - roll1.mean()) / roll1.std(ddof=0).replace(0.0, np.nan)
+
         # Feature 3: slope / velocity
         df[f"supply_slope{slope_window}"] = s.diff(slope_window) / float(slope_window)
-        
+
         # Префикс
         df = _prefix_columns(df, prefix=prefix, keep=("date",))
-        
+
         return df
 
     def get_bitcoin_active_addresses(
@@ -403,17 +417,30 @@ class FeaturesGetter:
         )
         
         s = df["sth_supply"].astype(float)
-        
+
         # Feature 1: pct change over N days (distribution / accumulation proxy)
         df[f"supply_pct{pct_window}"] = s / s.shift(pct_window) - 1.0
-        
+
         # Feature 2: rolling z-score (regime-normalized supply)
         minp = max(30, z_window // 3)
         roll = s.rolling(z_window, min_periods=minp)
         mu = roll.mean()
         sd = roll.std(ddof=0).replace(0.0, np.nan)
         df[f"supply_z{z_window}"] = (s - mu) / sd
-        
+
+        # Detrended momentum (mirror of LTH side; STH supply naturally drifts
+        # downward in a maturing bull market, so > / < lag comparisons are not
+        # a real signal — z-score of the change against its own distribution is).
+        chg7 = s - s.shift(7)
+        minp7 = max(10, 30 // 3)
+        roll7 = chg7.rolling(30, min_periods=minp7)
+        df["supply_chg7_z30"] = (chg7 - roll7.mean()) / roll7.std(ddof=0).replace(0.0, np.nan)
+
+        chg1 = s.diff(1)
+        minp1 = max(5, 14 // 3)
+        roll1 = chg1.rolling(14, min_periods=minp1)
+        df["supply_chg1_z14"] = (chg1 - roll1.mean()) / roll1.std(ddof=0).replace(0.0, np.nan)
+
         # Feature 3: slope / velocity
         df[f"supply_slope{slope_window}"] = s.diff(slope_window) / float(slope_window)
         
@@ -421,6 +448,308 @@ class FeaturesGetter:
         df = _prefix_columns(df, prefix=prefix, keep=("date",))
         
         return df
+    
+    def get_bitcoin_mvrv(
+        self,
+        z_window: int = 180,
+        slope_window: int = 14,
+        prefix: str = "index_btc_mvrv",
+    ) -> pd.DataFrame:
+        """
+        Bitcoin MVRV (Market Value / Realized Value), восстановленный из NUPL.
+
+        NUPL = (MCap - RCap) / MCap  =>  MVRV = MCap / RCap = 1 / (1 - NUPL)
+
+        Notes:
+            - CoinGlass endpoint NUPL иногда может приходить в процентах (например, 42.1
+              вместо 0.421). В таком случае автоматически масштабируем в доли.
+            - Z-score здесь rolling (окно z_window), т.к. каноничный market-cap z-score
+              требует отдельного исторического ряда market_cap.
+        """
+        df = _coinglass_get_dataframe(
+            endpoint="/index/bitcoin-net-unrealized-profit-loss",
+            api_key=self.api_key,
+        )
+
+        if df.empty:
+            return df
+
+        # timestamp -> date (этот эндпоинт использует timestamp)
+        if "timestamp" in df.columns:
+            df["date"] = _coinglass_normalize_time_to_date(df["timestamp"])
+            df = df.drop(columns=["timestamp"])
+
+        # Нормализация числовых колонок
+        df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
+        df["net_unpnl"] = pd.to_numeric(df.get("net_unpnl"), errors="coerce")
+
+        # Очистка и сортировка
+        df = (
+            df[["date", "price", "net_unpnl"]]
+            .dropna(subset=["date"])
+            .sort_values("date", kind="stable")
+            .drop_duplicates(subset=["date"], keep="last")
+            .reset_index(drop=True)
+        )
+
+        nupl = df["net_unpnl"].astype(float)
+
+        # Guard: если NUPL выглядит как проценты, приводим к долям.
+        finite_vals = nupl[np.isfinite(nupl)]
+        if not finite_vals.empty and finite_vals.abs().quantile(0.95) > 1.0:
+            nupl = nupl / 100.0
+        df["net_unpnl"] = nupl
+
+        # MVRV = 1 / (1 - NUPL). При NUPL -> 1 деление не определено.
+        denom = 1.0 - nupl
+        mvrv = 1.0 / denom.replace(0.0, np.nan)
+        mvrv = mvrv.where(np.isfinite(mvrv), np.nan)
+        df["mvrv"] = mvrv
+
+        # Log-transform: только положительные значения.
+        df["log_mvrv"] = np.log(np.where(mvrv > 0, mvrv, np.nan))
+
+        # Rolling z-score (regime-normalized MVRV)
+        minp = min(z_window, max(30, z_window // 3))
+        roll = mvrv.rolling(z_window, min_periods=minp)
+        mu = roll.mean()
+        sd = roll.std(ddof=0).replace(0.0, np.nan)
+        df[f"mvrv_z{z_window}"] = (mvrv - mu) / sd
+
+        # Slope / velocity
+        df[f"mvrv_slope{slope_window}"] = mvrv.diff(slope_window) / float(slope_window)
+
+        # Префикс
+        df = _prefix_columns(df, prefix=prefix, keep=("date",))
+        return df
+    
+    def _get_bitcoin_sopr_with_fallback(
+        self,
+        sopr_endpoint: str,
+        sopr_col: str,
+        realized_endpoint: str,
+        realized_col: str,
+        z_window: int,
+        slope_window: int,
+        prefix: str,
+    ) -> pd.DataFrame:
+        """
+        Fetch SOPR directly; if endpoint is unavailable, approximate via
+        price / realized_price from the corresponding realized-price endpoint.
+        """
+        sopr_df = pd.DataFrame()
+        sopr_source = "direct_sopr"
+        try:
+            sopr_df = _coinglass_get_dataframe(
+                endpoint=sopr_endpoint,
+                api_key=self.api_key,
+            )
+        except CoinGlassError as exc:
+            print(
+                f"[FeaturesGetter] SOPR endpoint failed ({sopr_endpoint}): {exc}. "
+                f"Falling back to {realized_endpoint}."
+            )
+            sopr_source = "price_over_realized_price"
+
+        if not sopr_df.empty and sopr_col in sopr_df.columns:
+            df = sopr_df.copy()
+            if "timestamp" in df.columns:
+                df["date"] = _coinglass_normalize_time_to_date(df["timestamp"])
+                df = df.drop(columns=["timestamp"])
+            df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
+            df["sopr"] = pd.to_numeric(df.get(sopr_col), errors="coerce")
+        else:
+            df = _coinglass_get_dataframe(
+                endpoint=realized_endpoint,
+                api_key=self.api_key,
+            )
+            if df.empty:
+                return df
+            if "timestamp" in df.columns:
+                df["date"] = _coinglass_normalize_time_to_date(df["timestamp"])
+                df = df.drop(columns=["timestamp"])
+            df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
+            realized_price = pd.to_numeric(df.get(realized_col), errors="coerce")
+            df["sopr"] = df["price"] / realized_price.replace(0.0, np.nan)
+
+        if df.empty:
+            return df
+
+        df = (
+            df[["date", "price", "sopr"]]
+            .dropna(subset=["date"])
+            .sort_values("date", kind="stable")
+            .drop_duplicates(subset=["date"], keep="last")
+            .reset_index(drop=True)
+        )
+
+        s = pd.to_numeric(df["sopr"], errors="coerce").astype(float)
+        s = s.where(np.isfinite(s), np.nan)
+        df["sopr"] = s
+        df["log_sopr"] = np.log(np.where(s > 0, s, np.nan))
+        df["sopr_minus_1"] = s - 1.0
+
+        minp = max(10, z_window // 3)
+        roll = s.rolling(z_window, min_periods=minp)
+        mu = roll.mean()
+        sd = roll.std(ddof=0).replace(0.0, np.nan)
+        df[f"sopr_z{z_window}"] = (s - mu) / sd
+
+        df[f"sopr_slope{slope_window}"] = s.diff(slope_window) / float(slope_window)
+        df["sopr_source_flag"] = 0.0 if sopr_source == "direct_sopr" else 1.0
+
+        df = _prefix_columns(df, prefix=prefix, keep=("date",))
+        return df
+
+    def get_bitcoin_sth_sopr(
+        self,
+        z_window: int = 30,
+        slope_window: int = 14,
+        prefix: str = "index_btc_sth_sopr",
+    ) -> pd.DataFrame:
+        """Bitcoin STH SOPR with fallback to price/realized-price approximation."""
+        return self._get_bitcoin_sopr_with_fallback(
+            sopr_endpoint="/index/bitcoin-sth-sopr",
+            sopr_col="sth_sopr",
+            realized_endpoint="/index/bitcoin-sth-realized-price",
+            realized_col="sth_realized_price",
+            z_window=z_window,
+            slope_window=slope_window,
+            prefix=prefix,
+        )
+
+    def get_bitcoin_lth_sopr(
+        self,
+        z_window: int = 180,
+        slope_window: int = 14,
+        prefix: str = "index_btc_lth_sopr",
+    ) -> pd.DataFrame:
+        """Bitcoin LTH SOPR with fallback to price/realized-price approximation."""
+        return self._get_bitcoin_sopr_with_fallback(
+            sopr_endpoint="/index/bitcoin-lth-sopr",
+            sopr_col="lth_sopr",
+            realized_endpoint="/index/bitcoin-lth-realized-price",
+            realized_col="lth_realized_price",
+            z_window=z_window,
+            slope_window=slope_window,
+            prefix=prefix,
+        )
+    
+    def get_bitcoin_nupl(
+        self,
+        z_window: int = 180,
+        slope_window: int = 14,
+        prefix: str = "index_btc_nupl",
+    ) -> pd.DataFrame:
+        """Bitcoin NUPL (Net Unrealized Profit/Loss) with rolling features."""
+        df = _coinglass_get_dataframe(
+            endpoint="/index/bitcoin-net-unrealized-profit-loss",
+            api_key=self.api_key,
+        )
+
+        if df.empty:
+            return df
+
+        if "timestamp" in df.columns:
+            df["date"] = _coinglass_normalize_time_to_date(df["timestamp"])
+            df = df.drop(columns=["timestamp"])
+
+        df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
+        nupl = pd.to_numeric(df.get("net_unpnl"), errors="coerce").astype(float)
+
+        # Guard: if NUPL comes in percent scale, convert to fraction.
+        finite_vals = nupl[np.isfinite(nupl)]
+        if not finite_vals.empty and finite_vals.abs().quantile(0.95) > 1.0:
+            nupl = nupl / 100.0
+
+        df["nupl"] = nupl
+
+        df = (
+            df[["date", "price", "nupl"]]
+            .dropna(subset=["date"])
+            .sort_values("date", kind="stable")
+            .drop_duplicates(subset=["date"], keep="last")
+            .reset_index(drop=True)
+        )
+
+        s = pd.to_numeric(df["nupl"], errors="coerce").astype(float)
+        s = s.where(np.isfinite(s), np.nan)
+        df["nupl"] = s
+
+        minp = max(30, z_window // 3)
+        roll = s.rolling(z_window, min_periods=minp)
+        mu = roll.mean()
+        sd = roll.std(ddof=0).replace(0.0, np.nan)
+        df[f"nupl_z{z_window}"] = (s - mu) / sd
+
+        df[f"nupl_slope{slope_window}"] = s.diff(slope_window) / float(slope_window)
+        df = _prefix_columns(df, prefix=prefix, keep=("date",))
+        return df
+
+    def get_puell_multiple(
+        self,
+        z_window: int = 180,
+        slope_window: int = 14,
+        prefix: str = "index_puell_multiple",
+    ) -> pd.DataFrame:
+        """Bitcoin Puell Multiple with rolling z-score and slope features."""
+        df = _coinglass_get_dataframe(
+            endpoint="/index/puell-multiple",
+            api_key=self.api_key,
+        )
+
+        if df.empty:
+            return df
+
+        if "timestamp" in df.columns:
+            df["date"] = _coinglass_normalize_time_to_date(df["timestamp"])
+            df = df.drop(columns=["timestamp"])
+        elif "time" in df.columns:
+            df["date"] = _coinglass_normalize_time_to_date(df["time"])
+            df = df.drop(columns=["time"])
+
+        df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
+
+        value_candidates = [
+            "puell_multiple",
+            "puell",
+            "multiple",
+            "value",
+            "index_value",
+        ]
+        value_col = next((c for c in value_candidates if c in df.columns), None)
+        if value_col is None:
+            skip = {"date", "price", "timestamp", "time"}
+            rest = [c for c in df.columns if c not in skip]
+            if not rest:
+                return pd.DataFrame()
+            value_col = rest[0]
+
+        df["puell_multiple"] = pd.to_numeric(df.get(value_col), errors="coerce")
+        df = (
+            df[["date", "price", "puell_multiple"]]
+            .dropna(subset=["date"])
+            .sort_values("date", kind="stable")
+            .drop_duplicates(subset=["date"], keep="last")
+            .reset_index(drop=True)
+        )
+
+        s = pd.to_numeric(df["puell_multiple"], errors="coerce").astype(float)
+        s = s.where(np.isfinite(s), np.nan)
+        df["puell_multiple"] = s
+        df["log_puell"] = np.log(np.where(s > 0, s, np.nan))
+
+        minp = max(30, z_window // 3)
+        roll = s.rolling(z_window, min_periods=minp)
+        mu = roll.mean()
+        sd = roll.std(ddof=0).replace(0.0, np.nan)
+        df[f"puell_z{z_window}"] = (s - mu) / sd
+        df[f"puell_slope{slope_window}"] = s.diff(slope_window) / float(slope_window)
+
+        df = _prefix_columns(df, prefix=prefix, keep=("date",))
+        return df
+    
+    
 
     def get_bitcoin_reserve_risk(
         self,
@@ -481,23 +810,32 @@ class FeaturesGetter:
         )
         
         rr = df["reserve_risk_index"].astype(float)
-        
+
         # Feature 1: log transform (reserve risk spans orders of magnitude)
         df["log_rr"] = np.log(np.where(rr > 0, rr, np.nan))
-        
+
         # Feature 2: rolling z-score (regime-normalized)
         minp = max(30, z_window // 3)
         roll = rr.rolling(z_window, min_periods=minp)
         mu = roll.mean()
         sd = roll.std(ddof=0).replace(0.0, np.nan)
         df[f"rr_z{z_window}"] = (rr - mu) / sd
-        
+
+        # Short-window z-scores: catch local regime shifts that rr_z180 misses
+        # in stable bull/bear regimes (where the 180d baseline drifts with price).
+        for w in (30, 90):
+            minp_w = max(10, w // 3)
+            roll_w = rr.rolling(w, min_periods=minp_w)
+            mu_w = roll_w.mean()
+            sd_w = roll_w.std(ddof=0).replace(0.0, np.nan)
+            df[f"rr_z{w}"] = (rr - mu_w) / sd_w
+
         # Feature 3: slope / velocity
         df[f"rr_slope{slope_window}"] = rr.diff(slope_window) / float(slope_window)
         
         # Префикс
         df = _prefix_columns(df, prefix=prefix, keep=("date",))
-        
+
         return df
 
     def get_bitfinex_margin_long_short(

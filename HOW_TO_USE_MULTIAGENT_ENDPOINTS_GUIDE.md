@@ -274,7 +274,11 @@ curl -X POST http://localhost:8000/api/multiagent_predictions \
                     "index_btc_reserve_risk__reserve_risk_index",
                     "index_btc_reserve_risk__log_rr",
                     "index_btc_reserve_risk__rr_z180",
-                    "index_btc_reserve_risk__rr_slope14"
+                    "index_btc_reserve_risk__rr_slope14",
+                    "index_btc_mvrv__mvrv",
+                    "index_btc_mvrv__log_mvrv",
+                    "index_btc_mvrv__mvrv_z180",
+                    "index_btc_mvrv__mvrv_slope14"
                 ],
                 "llm_model": "gpt-4.1",
                 "system_prompt_file": "agents/onchain_indicators/system_prompt_1d.md",

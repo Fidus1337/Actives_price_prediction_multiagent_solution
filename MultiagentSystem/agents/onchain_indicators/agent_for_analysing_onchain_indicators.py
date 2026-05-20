@@ -9,13 +9,12 @@ from multiagent_types import AgentState, get_agent_settings
 from pydantic import BaseModel
 
 
-# Agent cannot return None values or the value that does not match the schema
 class OnchainAnalysisResponse(BaseModel):
     reasoning: str        # step-by-step analysis of all on-chain indicators
     summary: str          # brief final conclusion: forecast + confidence
     risks: str            # risks and counter-arguments to the forecast
-    prediction: bool      # True = HIGHER, False = LOWER (always pick a direction)
-    confidence: Literal["high", "medium", "low"]
+    prediction: bool | None      # True = HIGHER, False = LOWER, None = no actionable on-chain trade
+    confidence: Literal["high", "medium", "low"] | None
 
 
 AGENT_DIR = Path(__file__).parent
@@ -66,6 +65,7 @@ def agent_for_analysing_onchain_indicators(state: AgentState):
     df = df.loc[df["date"] <= pd.Timestamp(forecast_date), ["date"] + cols].tail(settings["window_to_analysis"])
     print(f"{TAG}   Filtered data shape: {df.shape} | date range: {df['date'].iloc[0].date()} -> {df['date'].iloc[-1].date()}")
 
+    # Checks if we have everything right
     last_date = df["date"].iloc[-1].date() if len(df) > 0 else None
     expected_date = pd.Timestamp(forecast_date).date()
     if last_date != expected_date:
@@ -84,12 +84,12 @@ def agent_for_analysing_onchain_indicators(state: AgentState):
         }}}
     print(f"{TAG}   Last date validated: {last_date} == {expected_date}")
 
-    # 3. Convert to JSON for the prompt and save for debugging
+    # Convert to JSON for the prompt and save for debugging
     data_json = df.to_json(orient="records", date_format="iso")
     (AGENT_DIR / "input_data.json").write_text(data_json, encoding="utf-8")
     print(f"{TAG} [STEP 3/7] Input data saved to input_data.json ({len(data_json)} chars)")
 
-    # 4. Extract current closing price (last row)
+    # Extract current closing price (last row)
     close_col = "spot_price_history__close"
     close_price = df[close_col].iloc[-1] if close_col in df.columns else "N/A"
     print(f"{TAG} [STEP 4/7] Close price on {forecast_date}: {close_price}")
@@ -105,7 +105,7 @@ def agent_for_analysing_onchain_indicators(state: AgentState):
             "description_of_the_reports_problem": [],
         }}}
 
-    # 5. Load system prompt (from file or inline)
+    # Load system prompt (from file or inline)
     if "system_prompt_file" in settings:
         prompt_path = Path(__file__).parent.parent.parent / settings["system_prompt_file"]
         system_prompt = prompt_path.read_text(encoding="utf-8")
@@ -116,7 +116,11 @@ def agent_for_analysing_onchain_indicators(state: AgentState):
     system_prompt = system_prompt.replace("{HORIZON_DAYS}", str(horizon))
 
     # 6. Call LLM with CoT: reasoning is filled first, summary is based on it
-    llm = make_chat_llm(llm_model, temperature=0)
+    llm = make_chat_llm(
+        llm_model,
+        temperature=0,
+        reasoning_effort=settings.get("reasoning_effort"),
+    )
 
     # Read full validator-feedback history from retry_agents.retry_requirements
     # (accumulates across iterations) instead of agent_signals.description_of_the_reports_problem
@@ -135,10 +139,10 @@ def agent_for_analysing_onchain_indicators(state: AgentState):
             f"Current BTC closing price: {close_price}\n"
             f"Forecast horizon: {horizon} days (from {forecast_date})\n\n"
             f"Respond following the structure:\n"
-            f"1. PREDICTION: will the price be higher or lower in {horizon} days?\n"
+            f"1. PREDICTION: is there an actionable on-chain signal for {horizon} days?\n"
             f"   - True  = price HIGHER than {close_price} in {horizon} days\n"
             f"   - False = price LOWER than {close_price} in {horizon} days\n"
-            f"   ALWAYS pick a direction (True or False). Specify confidence level in the confidence field.\n"
+            f"   - None/null = no actionable on-chain trade; confidence must also be None/null\n"
             f"2. ARGUMENTS: which on-chain metrics support your forecast?\n"
         )),
     ]
@@ -173,7 +177,7 @@ def agent_for_analysing_onchain_indicators(state: AgentState):
             "description_of_the_reports_problem": [],
         }}}
 
-    pred_label = "HIGHER" if response.prediction else "LOWER"
+    pred_label = "HIGHER" if response.prediction is True else ("LOWER" if response.prediction is False else "NO TRADE")
     print(f"{TAG} LLM response received:")
     print(f"{TAG}   Prediction: {pred_label}")
     print(f"{TAG}   Confidence: {response.confidence}")

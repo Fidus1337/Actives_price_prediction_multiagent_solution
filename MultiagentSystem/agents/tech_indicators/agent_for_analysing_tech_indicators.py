@@ -19,8 +19,8 @@ class TechAnalysisResponse(BaseModel):
     reasoning: str        # step-by-step analysis of all indicators following the prompt structure
     summary: str          # brief final conclusion: forecast + confidence + range
     risks: str            # risks and counter-arguments to the forecast (2-5 points or "")
-    prediction: bool      # True = HIGHER, False = LOWER (always pick a direction)
-    confidence: Literal["high", "medium", "low"]
+    prediction: bool | None      # True = HIGHER, False = LOWER, None = abstain (no actionable signal)
+    confidence: Literal["high", "medium", "low"] | None
 
 def agent_for_analysing_tech_indicators(state: AgentState):
     TAG = "[agent_for_analysing_tech_indicators]"
@@ -193,7 +193,7 @@ def agent_for_analysing_tech_indicators(state: AgentState):
             "description_of_the_reports_problem": [],
         }}}
 
-    prediction_label = "HIGHER" if response.prediction else "LOWER"
+    prediction_label = "ABSTAIN" if response.prediction is None else ("HIGHER" if response.prediction else "LOWER")
     print(f"{TAG} LLM response received:")
     print(f"{TAG}   Prediction: {prediction_label}")
     print(f"{TAG}   Confidence: {response.confidence}")
