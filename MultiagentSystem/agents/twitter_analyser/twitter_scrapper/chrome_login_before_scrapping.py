@@ -7,6 +7,11 @@ and persists session cookies for reuse between runs.
 First run requires login (credentials from dev.env).
 Subsequent runs reuse saved cookies from twitter_cookies.json.
 
+Browser version: if CHROME_FOR_TESTING_DIR is set in the environment, _init_driver
+uses a pinned Chrome for Testing binary + matching driver (no version drift). Set it
+up once via setup_chrome_for_testing.py. Without that env var it falls back to the
+system Chrome (auto-detected major).
+
 Usage:
     python -m MultiagentSystem.agents.twitter_analyser.twitter_scrapper.chrome_login_before_scrapping --login
 """
@@ -88,11 +93,72 @@ def _detect_chrome_major() -> Optional[int]:
     return None
 
 
+_DEFAULT_CFT_DIR = Path(__file__).parent / "chrome-for-testing"
+
+
+def _cft_platform() -> "tuple[str, str]":
+    """Return (cft_platform_slug, binary_suffix) for the current OS."""
+    if sys.platform.startswith("win"):
+        return "win64", ".exe"
+    if sys.platform.startswith("linux"):
+        return "linux64", ""
+    raise RuntimeError(f"{LOG_TAG} unsupported platform for Chrome for Testing: {sys.platform}")
+
+
+def _cft_paths() -> "tuple[Path, Path, Optional[int]] | None":
+    """Chrome-for-Testing chrome+driver paths (cross-platform).
+
+    Base dir is CHROME_FOR_TESTING_DIR if set (e.g. /opt/chrome-for-testing in the
+    Docker image), otherwise the in-project default next to this file. Platform
+    subfolder/binary names are resolved per OS (win64/.exe vs linux64/no-ext).
+
+    Returns (chrome, driver, major) when present, else None (→ fall back to system
+    Chrome). Raises FileNotFoundError only when CHROME_FOR_TESTING_DIR is explicitly
+    set but its binaries are missing, so the failure is an explicit setup hint.
+    """
+    env_dir = os.environ.get("CHROME_FOR_TESTING_DIR")
+    base = Path(env_dir) if env_dir else _DEFAULT_CFT_DIR
+    plat, ext = _cft_platform()
+    chrome = base / f"chrome-{plat}" / f"chrome{ext}"
+    driver = base / f"chromedriver-{plat}" / f"chromedriver{ext}"
+    if not (chrome.exists() and driver.exists()):
+        if env_dir:
+            raise FileNotFoundError(
+                f"{LOG_TAG} CHROME_FOR_TESTING_DIR={base} is set but {plat} binaries are "
+                "missing. Run: python -m MultiagentSystem.agents.twitter_analyser."
+                "twitter_scrapper.setup_chrome_for_testing  (or rebuild the Docker image)"
+            )
+        return None
+    major: Optional[int] = None
+    version_file = base / "version.txt"
+    if version_file.exists():
+        try:
+            major = int(version_file.read_text(encoding="utf-8").strip().split(".", 1)[0])
+        except (ValueError, IndexError):
+            major = None
+    return chrome, driver, major
+
+
 def _init_driver(headless: bool = True) -> uc.Chrome:
     """Start undetected Chrome with a dedicated profile for scraping."""
     scraper_profile = Path(__file__).parent / "chrome_profile"
     scraper_profile.mkdir(exist_ok=True)
     _cleanup_profile_locks(scraper_profile)
+
+    # Prefer Chrome for Testing when configured — a pinned, never-auto-updating
+    # browser + matching driver, fully decoupled from the system Chrome. This makes
+    # the version drift that causes SessionNotCreatedException impossible.
+    cft = _cft_paths()
+    if cft:
+        chrome_bin, driver_bin, cft_major = cft
+        print(f"{LOG_TAG} Using Chrome for Testing: {chrome_bin} (major={cft_major})")
+        return uc.Chrome(
+            options=_build_options(headless),
+            user_data_dir=str(scraper_profile),
+            browser_executable_path=str(chrome_bin),
+            driver_executable_path=str(driver_bin),
+            version_main=cft_major,
+        )
 
     detected_major = _detect_chrome_major()
     if detected_major:

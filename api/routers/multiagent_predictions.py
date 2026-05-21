@@ -178,13 +178,12 @@ _AGENT_COLLECTORS = {
 }
 
 
-@router.post(
-    "/system/collect_agent_data",
-    response_model=CollectAgentDataResponse,
-    summary="Collect latest data for news and calendar agents",
-    description="Triggers incremental data collection for the specified agents, appending new records to their SQLite archives.",
-)
-async def collect_agent_data(request: CollectAgentDataRequest) -> CollectAgentDataResponse:
+async def collect_agent_data_core(request: CollectAgentDataRequest) -> CollectAgentDataResponse:
+    """Run incremental data collection for the requested agents.
+
+    Shared by the HTTP endpoint and the daily scheduler job (api.scheduler) so both
+    paths go through the same per-agent locks (_collection_locks) and stats shaping.
+    """
     unknown = set(request.agents) - _AGENT_COLLECTORS.keys()
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unknown agents: {sorted(unknown)}")
@@ -227,6 +226,16 @@ async def collect_agent_data(request: CollectAgentDataRequest) -> CollectAgentDa
                 raise HTTPException(status_code=500, detail=f"Collection failed for '{agent_name}': {exc}") from exc
 
     return CollectAgentDataResponse(results=results)
+
+
+@router.post(
+    "/system/collect_agent_data",
+    response_model=CollectAgentDataResponse,
+    summary="Collect latest data for news and calendar agents",
+    description="Triggers incremental data collection for the specified agents, appending new records to their SQLite archives.",
+)
+async def collect_agent_data(request: CollectAgentDataRequest) -> CollectAgentDataResponse:
+    return await collect_agent_data_core(request)
 
 
 @router.get(

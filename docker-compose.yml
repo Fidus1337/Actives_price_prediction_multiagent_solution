@@ -9,7 +9,7 @@
 #
 # Рядом с этим файлом должны лежать:
 #   dev.env, news_archive.db, calendar_archive.db,
-#   twitter_archive.db, chrome_profile/
+#   twitter_archive.db, chrome_profile/, collect_scheduler_settings.json
 # =========================================================
 
 services:
@@ -23,4 +23,5 @@ services:
       - ./calendar_archive.db:/app/MultiagentSystem/agents/economic_calendar_analyser/calendar_archive.db
       - ./twitter_archive.db:/app/MultiagentSystem/agents/twitter_analyser/twitter_archive.db
       - ./chrome_profile:/app/MultiagentSystem/agents/twitter_analyser/twitter_scrapper/chrome_profile
+      - ./collect_scheduler_settings.json:/app/configs/collect_scheduler_settings.json
     restart: unless-stopped

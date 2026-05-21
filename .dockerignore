@@ -27,6 +27,8 @@ Thumbs.db
 
 # --- Heavy mounted-at-runtime data (provided via volumes in docker-compose) ---
 **/chrome_profile/
+# Host CfT binaries (win64) — Linux image downloads its own linux64 CfT at build
+**/chrome-for-testing/
 **/*.db
 **/*.sqlite
 **/*.sqlite3

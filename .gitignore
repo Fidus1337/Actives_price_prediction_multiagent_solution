@@ -192,6 +192,7 @@ Classic_ml_model_solutions/Created_models_to_use/plots/
 Classic_ml_model_solutions/Created_models_to_use/
 
 MultiagentSystem/agents/twitter_analyser/twitter_scrapper/chrome_profile/
+MultiagentSystem/agents/twitter_analyser/twitter_scrapper/chrome-for-testing/
 *.db
 
 *.csv

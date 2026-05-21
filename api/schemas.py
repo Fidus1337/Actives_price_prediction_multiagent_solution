@@ -259,6 +259,72 @@ class CollectAgentDataResponse(BaseModel):
     results: list[CollectAgentDataResult]
 
 
+class CollectSchedulerSettings(BaseModel):
+    """Settings for the daily auto-collection scheduler (00:00 UTC = Bybit daily candle open)."""
+
+    enabled: bool = Field(default=True, description="Whether the daily collection job is active")
+    hour: int = Field(default=0, ge=0, le=23, description="Trigger hour in UTC")
+    minute: int = Field(default=0, ge=0, le=59, description="Trigger minute in UTC")
+    since_days: int = Field(
+        default=5, ge=1, le=365,
+        description="twitter_since_date = today - since_days (UTC); twitter_until_date = today",
+    )
+    agents: list[str] = Field(
+        default=["news_analyser", "economic_calendar_analyser", "twitter_analyser"],
+        description="Agents to collect for. Valid: 'news_analyser', 'economic_calendar_analyser', 'twitter_analyser'",
+    )
+    twitter_authors: list[str] = Field(
+        default=[
+            "CarpeNoctom", "JSeyff", "AltcoinPsycho", "DavidDuong",
+            "TraderMercury", "_Checkmatey_", "CryptoHayes", "rektcapital",
+        ],
+        description="Twitter usernames scraped by the scheduled collection",
+    )
+
+
+class ChangeCollectSchedulerSettingsRequest(BaseModel):
+    """Partial update for the scheduler settings — send only the fields you want to change."""
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "enabled": True,
+            "hour": 0,
+            "minute": 0,
+            "since_days": 5,
+            "agents": [
+                "news_analyser",
+                "economic_calendar_analyser",
+                "twitter_analyser",
+            ],
+            "twitter_authors": [
+                "CarpeNoctom",
+                "JSeyff",
+                "AltcoinPsycho",
+                "DavidDuong",
+                "TraderMercury",
+                "_Checkmatey_",
+                "CryptoHayes",
+                "rektcapital",
+            ],
+        }
+    })
+
+    enabled: bool | None = None
+    hour: int | None = Field(default=None, ge=0, le=23)
+    minute: int | None = Field(default=None, ge=0, le=59)
+    since_days: int | None = Field(default=None, ge=1, le=365)
+    agents: list[str] | None = None
+    twitter_authors: list[str] | None = None
+
+
+class CollectSchedulerSettingsResponse(BaseModel):
+    settings: CollectSchedulerSettings
+    next_run_time: str | None = Field(
+        default=None,
+        description="Next scheduled run (ISO 8601, UTC). null when the job is paused (enabled=false)",
+    )
+
+
 class AgentsDataStatusResponse(BaseModel):
     news_analyser: str | None = Field(None, description="Last fetched date in news archive (YYYY-MM-DD)")
     economic_calendar_analyser: str | None = Field(None, description="Last fetched date in calendar archive (YYYY-MM-DD)")
