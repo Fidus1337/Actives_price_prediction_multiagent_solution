@@ -108,6 +108,13 @@ async def multiagent_predictions(request: MultiagentPredictionsRequest) -> Multi
     if _prediction_lock.locked():
         raise HTTPException(status_code=409, detail="Multiagent prediction is already running")
 
+    collecting = sorted(name for name, lock in _collection_locks.items() if lock.locked())
+    if collecting:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Data collection in progress for {collecting}; predictions are paused until it finishes",
+        )
+
     async with _prediction_lock:
         try:
             config = request.model_dump(exclude={"n_last_dates"})
