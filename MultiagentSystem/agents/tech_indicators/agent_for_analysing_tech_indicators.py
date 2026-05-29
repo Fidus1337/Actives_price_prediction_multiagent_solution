@@ -6,6 +6,7 @@ import pandas as pd
 from langchain_core.messages import HumanMessage, SystemMessage
 from llm_factory import make_chat_llm
 from multiagent_types import AgentState, get_agent_settings
+from prompt_debug import save_agent_io
 from pydantic import BaseModel
 
 AGENT_DIR = Path(__file__).parent
@@ -170,11 +171,8 @@ def agent_for_analysing_tech_indicators(state: AgentState):
     else:
         print(f"{TAG}   No previous validator feedback")
 
-    message_csv_path = AGENT_DIR / "message_to_bot.csv"
-    pd.DataFrame(
-        [{"role": type(m).__name__, "content": m.content} for m in messages]
-    ).to_csv(message_csv_path, index=False)
-    print(f"{TAG}   Prompt saved to {message_csv_path.name} ({len(messages)} message(s))")
+    save_agent_io(state, AGENT_NAME, messages, attempt=attempt, forecast_date=forecast_date, llm_model=llm_model)
+    print(f"{TAG}   Prompt saved to run debug folder ({len(messages)} message(s))")
 
     print(f"{TAG} [STEP 6/6] Calling LLM ({llm_model}) with {len(messages)} messages...")
 
@@ -184,6 +182,7 @@ def agent_for_analysing_tech_indicators(state: AgentState):
     except Exception as exc:
         err = f"LLM request failed in {AGENT_NAME}: {exc}"
         print(f"{TAG}   ERROR: {err}")
+        save_agent_io(state, AGENT_NAME, messages, attempt=attempt, forecast_date=forecast_date, llm_model=llm_model, error=str(exc))
         return {"agent_signals": {AGENT_NAME: {
             "reasoning": err,
             "summary": "LLM temporarily unavailable — abstain from voting.",
@@ -192,6 +191,8 @@ def agent_for_analysing_tech_indicators(state: AgentState):
             "confidence": None,
             "description_of_the_reports_problem": [],
         }}}
+
+    save_agent_io(state, AGENT_NAME, messages, attempt=attempt, forecast_date=forecast_date, llm_model=llm_model, response=response)
 
     prediction_label = "ABSTAIN" if response.prediction is None else ("HIGHER" if response.prediction else "LOWER")
     print(f"{TAG} LLM response received:")

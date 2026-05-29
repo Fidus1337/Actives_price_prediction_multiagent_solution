@@ -5,6 +5,7 @@ from typing import cast
 from langchain_core.messages import HumanMessage, SystemMessage
 from llm_factory import make_chat_llm
 from multiagent_types import AgentState, AgentSignal, AgentRetry, NON_VALIDATED_AGENTS
+from prompt_debug import save_agent_io
 from pydantic import BaseModel
 
 
@@ -21,6 +22,7 @@ VALIDATOR_SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8").strip()
 _SKIP_AGENTS = NON_VALIDATED_AGENTS
 
 TAG = "[validator]"
+AGENT_NAME = "verdicts_validator"
 
 
 _DEFAULT_VALIDATOR_MODEL = "claude-sonnet-4-5"
@@ -84,6 +86,10 @@ def agent_for_verdicts_validation(state: AgentState):
             )),
         ]
 
+        # attempt = the retry index that produced the report under review
+        val_attempt = retry_map[agent_name]["currents_retry"]
+        save_agent_io(state, AGENT_NAME, messages, attempt=val_attempt, sub_label=agent_name, llm_model=model)
+
         try:
             result = cast(
                 AgentValidationResult,
@@ -91,7 +97,10 @@ def agent_for_verdicts_validation(state: AgentState):
             )
         except Exception as exc:
             print(f"{TAG} {agent_name}: LLM call failed — {exc}, skipping validation")
+            save_agent_io(state, AGENT_NAME, messages, attempt=val_attempt, sub_label=agent_name, llm_model=model, error=str(exc))
             continue
+
+        save_agent_io(state, AGENT_NAME, messages, attempt=val_attempt, sub_label=agent_name, llm_model=model, response=result)
 
         if result.has_problem:
             entry = retry_map[agent_name]

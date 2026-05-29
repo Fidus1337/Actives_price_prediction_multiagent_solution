@@ -6,6 +6,7 @@ import pandas as pd
 from langchain_core.messages import HumanMessage, SystemMessage
 from llm_factory import make_chat_llm
 from multiagent_types import AgentState, get_agent_settings
+from prompt_debug import save_agent_io
 from pydantic import BaseModel
 
 
@@ -160,6 +161,7 @@ def agent_for_analysing_onchain_indicators(state: AgentState):
     else:
         print(f"{TAG} [STEP 6/7] No previous validator feedback")
 
+    save_agent_io(state, AGENT_NAME, messages, attempt=attempt, forecast_date=forecast_date, llm_model=llm_model)
     print(f"{TAG} [STEP 7/7] Calling LLM ({llm_model}) with {len(messages)} messages...")
 
     # Tells the LLM to return a JSON object that matches the Pydantic schema, instead of free-form text.
@@ -168,6 +170,7 @@ def agent_for_analysing_onchain_indicators(state: AgentState):
     except Exception as exc:
         err = f"LLM request failed in {AGENT_NAME}: {exc}"
         print(f"{TAG}   ERROR: {err}")
+        save_agent_io(state, AGENT_NAME, messages, attempt=attempt, forecast_date=forecast_date, llm_model=llm_model, error=str(exc))
         return {"agent_signals": {AGENT_NAME: {
             "reasoning": err,
             "summary": "LLM temporarily unavailable — abstain from voting.",
@@ -176,6 +179,8 @@ def agent_for_analysing_onchain_indicators(state: AgentState):
             "confidence": None,
             "description_of_the_reports_problem": [],
         }}}
+
+    save_agent_io(state, AGENT_NAME, messages, attempt=attempt, forecast_date=forecast_date, llm_model=llm_model, response=response)
 
     pred_label = "HIGHER" if response.prediction is True else ("LOWER" if response.prediction is False else "NO TRADE")
     print(f"{TAG} LLM response received:")

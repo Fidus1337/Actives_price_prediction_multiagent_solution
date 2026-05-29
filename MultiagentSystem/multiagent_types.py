@@ -56,6 +56,7 @@ class AgentState(TypedDict):
     forecast_start_date: str
     save_results: bool                 # write each prediction row to CSV at save_path
     save_path: str | None              # CSV path; ignored when save_results is False
+    debug_run_dir: NotRequired[str | None]  # run-scoped folder for prompt debug files (None = disabled)
     agent_signals: Annotated[dict[str, AgentSignal], merge_dicts] # every agent returns signal
     retry_agents: Annotated[list[AgentRetry], merge_retry_agents]
 

@@ -1,3 +1,4 @@
+import contextlib
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -7,6 +8,87 @@ from MultiagentSystem.dataset_pipeline.FeaturesGetterModule.FeaturesGetter impor
 from MultiagentSystem.dataset_pipeline.SharedDataCache.SharedBaseDataCache import SharedBaseDataCache
 
 
+# Max length for any single string kept in a trace payload. Normal prompts are
+# a few KB and pass through whole; only multi-MB blobs (embedded data_json,
+# aggregated tweet/news dumps in agent reasoning) get truncated. Full prompts
+# are still saved to debug_prompts/ on disk via save_agent_io, so nothing is
+# lost — this only keeps each LangSmith POST small enough to upload reliably.
+_MAX_TRACE_STR = 30_000
+
+
+def _redact_heavy(obj):
+    """Shrink bulky values in the trace copy of run inputs/outputs.
+
+    cached_dataset (the full SharedBaseDataCache base_df) lives in the graph
+    state and is serialized into every node's input/output; large agent
+    reasoning strings propagate the same way. Without trimming, one prediction's
+    trace is tens of MB and fails to ingest (20MB hard limit + upload timeouts).
+    Runs only on the trace copy — the live state and the real LLM prompts are
+    untouched.
+    """
+    try:
+        if isinstance(obj, pd.DataFrame):
+            return f"<DataFrame shape={obj.shape}>"
+        if isinstance(obj, pd.Series):
+            return f"<Series len={len(obj)}>"
+        if isinstance(obj, str):
+            if len(obj) > _MAX_TRACE_STR:
+                return obj[:_MAX_TRACE_STR] + f"...[truncated {len(obj) - _MAX_TRACE_STR} chars]"
+            return obj
+        if isinstance(obj, dict):
+            return {k: _redact_heavy(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_redact_heavy(v) for v in obj]
+    except Exception:
+        pass
+    return obj
+
+
+def _configure_tracing_redaction() -> None:
+    """Make the LangSmith auto-tracer drop DataFrames from trace payloads.
+
+    Sets hide_inputs/hide_outputs on the shared cached client that the
+    env-based tracer (and wait_for_all_tracers) already use, so no per-invoke
+    callback wiring is needed. No-op when tracing is disabled.
+    """
+    if os.getenv("LANGSMITH_TRACING", "").lower() != "true":
+        return
+    try:
+        from langsmith.run_trees import get_cached_client
+        client = get_cached_client()
+        client._hide_inputs = _redact_heavy
+        client._hide_outputs = _redact_heavy
+    except Exception as exc:
+        print(f"[predictions] Could not configure trace redaction: {exc}")
+
+
+def _batch_trace(config: dict, last_days: int):
+    """Parent trace wrapping a whole N-day backtest.
+
+    Each day's app.invoke nests under this root, so LangSmith shows one trace
+    ("backtest <date> N=<n>") whose cost/tokens = the sum across all days.
+    No-op context when tracing is disabled.
+    """
+    if os.getenv("LANGSMITH_TRACING", "").lower() != "true":
+        return contextlib.nullcontext()
+    try:
+        from langsmith import trace
+        return trace(
+            name=f"backtest {config['forecast_start_date']} N={last_days}",
+            run_type="chain",
+            project_name=os.getenv("LANGSMITH_PROJECT"),
+            tags=["backtest", f"horizon={config['horizon']}"],
+            metadata={
+                "last_days": last_days,
+                "horizon": config["horizon"],
+                "forecast_start_date": config["forecast_start_date"],
+            },
+        )
+    except Exception as exc:
+        print(f"[predictions] Could not open batch trace: {exc}")
+        return contextlib.nullcontext()
+
+
 def make_one_prediction(
     app,
     config: dict,
@@ -14,23 +96,36 @@ def make_one_prediction(
     cached_dataset: pd.DataFrame | None,
     save_results: bool = False,
     save_path: str | None = None,
+    debug_run_dir: str | None = None,
 ) -> dict:
-    final_state = app.invoke({
-        "config": config,
-        "horizon": config["horizon"],
-        "forecast_start_date": forecast_start_date,
-        "agent_envolved_in_prediction": config["agent_envolved_in_prediction"],
-        "cached_dataset": cached_dataset,
-        "general_prediction_by_all_reports": None,
-        "general_reports_summary": "",
-        "general_reports_reasoning": "",
-        "general_reports_risks": "",
-        "confidence_score": 0.0,
-        "save_results": save_results,
-        "save_path": save_path,
-        "agent_signals": {},
-        "retry_agents": [],
-    })
+    final_state = app.invoke(
+        {
+            "config": config,
+            "horizon": config["horizon"],
+            "forecast_start_date": forecast_start_date,
+            "agent_envolved_in_prediction": config["agent_envolved_in_prediction"],
+            "cached_dataset": cached_dataset,
+            "general_prediction_by_all_reports": None,
+            "general_reports_summary": "",
+            "general_reports_reasoning": "",
+            "general_reports_risks": "",
+            "confidence_score": 0.0,
+            "save_results": save_results,
+            "save_path": save_path,
+            "debug_run_dir": debug_run_dir,
+            "agent_signals": {},
+            "retry_agents": [],
+        },
+        config={
+            "run_name": f"prediction {forecast_start_date}",
+            "tags": ["prediction", f"horizon={config['horizon']}"],
+            "metadata": {
+                "forecast_start_date": forecast_start_date,
+                "horizon": config["horizon"],
+                "agents": config.get("agent_envolved_in_prediction", []),
+            },
+        },
+    )
 
     row = {
         "forecast_start_date": forecast_start_date,
@@ -76,6 +171,17 @@ def make_prediction_for_last_N_days(
     end_date = datetime.strptime(config["forecast_start_date"], "%Y-%m-%d")
     print(f"FORECAST_DATE: {end_date}")
 
+    # Keep the full cached_dataset out of LangSmith trace payloads (else one
+    # prediction's trace exceeds the 20MB/run ingest limit and is dropped).
+    _configure_tracing_redaction()
+
+    # One run-scoped folder for all agent prompt/response debug dumps.
+    debug_run_dir: str | None = None
+    if config.get("debug_save_prompts", True):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_run_dir = str(Path(__file__).resolve().parent / "debug_prompts" / f"run_{ts}")
+        print(f"[predictions] Saving agent prompts to {debug_run_dir}")
+
     if save_results and save_path:
         Path(save_path).unlink(missing_ok=True)
 
@@ -107,33 +213,35 @@ def make_prediction_for_last_N_days(
         print("[predictions] No dataset-dependent agents — skipping CoinGlass fetch")
 
     rows = []
-    for i in range(last_days):
-        forecast_date = (end_date - timedelta(days=i)).strftime("%Y-%m-%d")
-        print(f"\n{'='*60}")
-        print(f"[predictions] Day {i + 1}/{last_days} — forecast_date={forecast_date}")
-        print(f"{'='*60}")
+    with _batch_trace(config, last_days):
+        for i in range(last_days):
+            forecast_date = (end_date - timedelta(days=i)).strftime("%Y-%m-%d")
+            print(f"\n{'='*60}")
+            print(f"[predictions] Day {i + 1}/{last_days} — forecast_date={forecast_date}")
+            print(f"{'='*60}")
 
-        print("DATE PREDICT:", forecast_date)
-        row = make_one_prediction(
-            app,
-            config,
-            forecast_date,
-            cached_dataset,
-            save_results=save_results,
-            save_path=save_path,
-        )
+            print("DATE PREDICT:", forecast_date)
+            row = make_one_prediction(
+                app,
+                config,
+                forecast_date,
+                cached_dataset,
+                save_results=save_results,
+                save_path=save_path,
+                debug_run_dir=debug_run_dir,
+            )
 
-        rows.append(row)
+            rows.append(row)
 
-        # UPDATE CONFUSION MATRIX AFTER N PREDICTS
-        if (
-            checkpoint_every > 0
-            and cm_path is not None
-            and (i + 1) % checkpoint_every == 0
-        ):
-            partial = add_y_true(pd.DataFrame(rows), config["horizon"])
-            print(f"[predictions] Checkpoint CM after {i + 1}/{last_days} predictions...")
-            build_confusion_matrix(partial, config["horizon"], cm_path)
+            # UPDATE CONFUSION MATRIX AFTER N PREDICTS
+            if (
+                checkpoint_every > 0
+                and cm_path is not None
+                and (i + 1) % checkpoint_every == 0
+            ):
+                partial = add_y_true(pd.DataFrame(rows), config["horizon"])
+                print(f"[predictions] Checkpoint CM after {i + 1}/{last_days} predictions...")
+                build_confusion_matrix(partial, config["horizon"], cm_path)
 
     return pd.DataFrame(rows)
 

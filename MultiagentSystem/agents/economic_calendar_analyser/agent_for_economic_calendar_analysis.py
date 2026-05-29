@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from llm_factory import make_chat_llm
 from multiagent_types import AgentState, get_agent_settings
+from prompt_debug import save_agent_io
 from .calendar_collector import get_events_in_range
 
 
@@ -252,16 +253,20 @@ def agent_for_economic_calendar_analysis(state: AgentState):
     system_msg = SYSTEM_PROMPT.format(horizon=horizon, window=window_days)
 
     print(f"{LOG_TAG}   Sending {len(filtered)} events to LLM...")
-    
+
+    messages = [
+        SystemMessage(content=system_msg),
+        HumanMessage(content=f"Analyze these {len(filtered)} economic calendar events:\n\n{events_text}"),
+    ]
+    save_agent_io(state, AGENT_NAME, messages, attempt=attempt, forecast_date=forecast_date, llm_model=llm_model)
+
     llm = make_chat_llm(llm_model, temperature=0.0)
     try:
-        verdict = llm.with_structured_output(CalendarVerdict).invoke([
-            SystemMessage(content=system_msg),
-            HumanMessage(content=f"Analyze these {len(filtered)} economic calendar events:\n\n{events_text}"),
-        ])
+        verdict = llm.with_structured_output(CalendarVerdict).invoke(messages)
     except Exception as exc:
         err = f"LLM request failed in {AGENT_NAME}: {exc}"
         print(f"{LOG_TAG}   ERROR: {err}")
+        save_agent_io(state, AGENT_NAME, messages, attempt=attempt, forecast_date=forecast_date, llm_model=llm_model, error=str(exc))
         return {"agent_signals": {AGENT_NAME: {
             "reasoning": err,
             "summary": "LLM temporarily unavailable — abstain from voting.",
@@ -270,6 +275,8 @@ def agent_for_economic_calendar_analysis(state: AgentState):
             "confidence": None,
             "description_of_the_reports_problem": [],
         }}}
+
+    save_agent_io(state, AGENT_NAME, messages, attempt=attempt, forecast_date=forecast_date, llm_model=llm_model, response=verdict)
 
     final_direction = verdict.direction
     final_confidence = verdict.confidence

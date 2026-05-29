@@ -198,3 +198,6 @@ MultiagentSystem/agents/twitter_analyser/twitter_scrapper/chrome-for-testing/
 *.csv
 *.log
 *.json
+
+# Per-run agent prompt/response debug dumps
+MultiagentSystem/debug_prompts/

@@ -32,7 +32,7 @@ if __name__ == "__main__":
         config = json.load(f)
 
     # Last days to analyis
-    N_days = 1
+    N_days = 3
 
     load_dotenv(Path(__file__).resolve().parent.parent / "dev.env")
     os.environ["COINGLASS_API_KEY"]  # fail fast if key is missing
