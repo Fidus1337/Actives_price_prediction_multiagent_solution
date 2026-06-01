@@ -167,6 +167,7 @@ curl -X POST http://localhost:8000/api/system/collect_agent_data \
 | `agent_envolved_in_prediction` | `list[str]` (≥1) | Активні агенти. Допустимі імена: `agent_for_analysing_tech_indicators`, `agent_for_twitter_analysis`, `agent_for_news_analysis`, `agent_for_economic_calendar_analysis`, `agent_for_analysing_onchain_indicators`. **Хто не в списку — не голосує**, навіть якщо його налаштування присутні в `agent_settings`. |
 | `neutral_threshold` | `float` | Поріг нейтральності для `confidence_score`. `0` → нейтральної зони немає (будь-який ненульовий score дає LONG/SHORT). Підніміть до `1.0+`, щоб фільтрувати слабкі сигнали. |
 | `agent_settings` | `dict` | Per-agent блоки. Зарезервований ключ `verdicts_validator` — для моделі валідатора. |
+| `force_recompute` | `bool` (default `false`) | `false` — дати, які вже є в кеші, повертаються з нього (швидко, без LLM). `true` — ігнорувати кеш і прорахувати всі дати наново, перезаписавши кеш свіжими значеннями. Див. розділ **Кеш прогнозів**. |
 
 #### Поля всередині `agent_settings`-блоку
 
@@ -337,3 +338,65 @@ curl -X POST http://localhost:8000/api/multiagent_predictions \
 | 409 | Інший прогноз ще виконується | `{"detail": "Multiagent prediction is already running"}` — зачекайте 5–30 с і повторіть |
 | 422 | Pydantic-валідація (формат дати, діапазон `horizon`/`n_last_dates`, порожній `agent_envolved_in_prediction`) | стандартне тіло `422` |
 | 500 | Невловлене виключення під час прогнозу | `{"detail": "Failed to run multiagent predictions: <текст>"}` |
+
+---
+
+## Кеш прогнозів — `/api/cache/...`
+
+Кожен прорахований прогноз кешується в окремій SQLite-БД за ключем
+**(`config_hash`, `forecast_start_date`)**. При повторному виклику
+`/api/multiagent_predictions` дати, які вже є в кеші, повертаються миттєво — без
+LLM-прогону; якщо **всі** запитані дати в кеші, важкий фетч CoinGlass теж не
+запускається.
+
+**Що таке `config_hash`.** Це 16-символьний хеш від полів, які **визначають
+прогноз**: `horizon`, `neutral_threshold`, `agent_envolved_in_prediction` і блоки
+`agent_settings` задіяних агентів (+ `verdicts_validator`). Поля
+`forecast_start_date`, `n_last_dates`, `force_recompute` на хеш **не впливають** —
+тому один і той самий конфіг на різні/перекриті дати ділить спільний кеш.
+
+**Що кешується.** Тільки сам прогноз (`y_prediction`, `confidence_score`, виходи
+агентів). `y_true` (фактичний рух ціни) рахується наново на кожен запит, тому для
+свіжих дат він завжди актуальний.
+
+**Ретенція.** Зберігаються лише прогнози з `forecast_start_date` за останні
+`save_n_last_days` днів (ковзне вікно від сьогодні, UTC); старіші чистяться
+автоматично після кожного прогнозу.
+
+| Метод | Шлях | Призначення |
+| --- | --- | --- |
+| GET | `/api/cache/settings` | Прочитати `save_n_last_days`. |
+| PUT | `/api/cache/settings` | Змінити `save_n_last_days` «на льоту» (без рестарту). Тіло: `{"save_n_last_days": 30}`. |
+| GET | `/api/cache/configs` | Список усіх кешованих конфігів + кількість і діапазон кешованих дат. |
+| GET | `/api/cache/configs/{config_hash}` | Кількість/діапазон кешованих дат для одного конфіга (404, якщо невідомий). |
+| DELETE | `/api/cache/configs/{config_hash}` | Очистити кеш одного конфіга. |
+| DELETE | `/api/cache` | Очистити **весь** кеш. |
+| POST | `/api/cache/hash` | Порахувати `config_hash` для тіла-конфіга (того самого формату, що `/api/multiagent_predictions`). |
+
+> Деструктивні `DELETE` і `PUT /settings` повертають `409`, якщо саме зараз
+> виконується прогноз — зачекайте і повторіть.
+
+#### Типовий потік
+
+1. `POST /api/cache/hash` з вашим конфігом → отримуєте `config_hash`.
+2. `GET /api/cache/configs/{config_hash}` → бачите, скільки дат уже закешовано.
+3. Повторний `POST /api/multiagent_predictions` з тим самим конфігом → перекриті
+   дати повертаються з кешу. Щоб примусово перерахувати — додайте
+   `"force_recompute": true`.
+
+```bash
+# дізнатися hash свого конфіга
+curl -X POST http://localhost:8000/api/cache/hash \
+    -H "Content-Type: application/json" -d '{ ... той самий конфіг ... }'
+# -> {"config_hash": "a1b2c3d4e5f60718"}
+
+# подивитися, що закешовано
+curl http://localhost:8000/api/cache/configs
+
+# змінити вікно ретенції
+curl -X PUT http://localhost:8000/api/cache/settings \
+    -H "Content-Type: application/json" -d '{"save_n_last_days": 14}'
+
+# очистити кеш одного конфіга
+curl -X DELETE http://localhost:8000/api/cache/configs/a1b2c3d4e5f60718
+```

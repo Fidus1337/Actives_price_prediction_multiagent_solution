@@ -14,8 +14,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)  # Set working directory for config/model paths
 
 from api.routers import multiagent_predictions
+from api.routers import predictions_cache
 from api.routers import scheduler as scheduler_router
 from api.scheduler import JOB_ID, create_scheduler, get_settings
+from Database_of_cached_results_for_predictions.predictions_database import Database
 
 
 @asynccontextmanager
@@ -24,6 +26,9 @@ async def lifespan(app: FastAPI):
     load_dotenv(PROJECT_ROOT / "dev.env")
     if not os.getenv("COINGLASS_API_KEY"):
         print("Warning: COINGLASS_API_KEY not found. Predictions will fail.")
+
+    Database().init_db()
+    print("Predictions cache initialized.")
 
     scheduler = create_scheduler()
     scheduler.start()
@@ -56,6 +61,16 @@ API for predicting Bitcoin price direction using a multiagent system.
 
 - **GET /api/system/collect_scheduler_settings** — read scheduler settings + next run (UTC)
 - **POST /api/system/change_collect_scheduler_settings** — change schedule live (no restart)
+
+## Predictions Cache
+
+- **GET /api/cache/settings** — read cache settings (save_n_last_days)
+- **PUT /api/cache/settings** — change retention window live (no restart)
+- **GET /api/cache/configs** — list cached configs + cached-date counts
+- **GET /api/cache/configs/{config_hash}** — cached-date count/range for one config
+- **DELETE /api/cache/configs/{config_hash}** — clear cache for one config
+- **DELETE /api/cache** — clear the entire predictions cache
+- **POST /api/cache/hash** — compute config_hash for a prediction config
 """,
     version="2.0.0",
     lifespan=lifespan,
@@ -72,6 +87,7 @@ app.add_middleware(
 )
 
 app.include_router(multiagent_predictions.router)
+app.include_router(predictions_cache.router)
 app.include_router(scheduler_router.router)
 
 

@@ -8,6 +8,8 @@ import pandas as pd
 
 from MultiagentSystem.multiagent_predictions_module import make_prediction_for_last_N_days, add_y_true
 from MultiagentSystem.multiagent_system_main import app as multiagent_app
+from Database_of_cached_results_for_predictions.predictions_database import Database
+from api.cache_settings import get_cache_settings
 from MultiagentSystem.agents.news_analyser.news_collector import collect_news
 from MultiagentSystem.agents.news_analyser.news_archive_database_manipulator import get_latest_date as news_get_latest_date
 from MultiagentSystem.agents.economic_calendar_analyser.calendar_collector import collect_calendar_events
@@ -117,14 +119,21 @@ async def multiagent_predictions(request: MultiagentPredictionsRequest) -> Multi
 
     async with _prediction_lock:
         try:
-            config = request.model_dump(exclude={"n_last_dates"})
+            config = request.model_dump(exclude={"n_last_dates", "force_recompute"})
+            cache = Database()
+            config_hash = cache.convert_config_json_into_hash(config)
             results_df = await run_in_threadpool(
                 make_prediction_for_last_N_days,
                 multiagent_app,
                 config,
                 request.n_last_dates,
+                cache=cache,
+                config_hash=config_hash,
+                force_recompute=request.force_recompute,
             )
             results_df = add_y_true(results_df, request.horizon)
+            # Enforce the retention window after writing new entries.
+            await run_in_threadpool(cache.clean_old_records, get_cache_settings().save_n_last_days)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to run multiagent predictions: {exc}") from exc
 

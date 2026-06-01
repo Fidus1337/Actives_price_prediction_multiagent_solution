@@ -167,7 +167,20 @@ def make_prediction_for_last_N_days(
     cm_path: Path | None = None,
     save_results: bool = False,
     save_path: str | None = None,
+    cache=None,
+    config_hash: str | None = None,
+    force_recompute: bool = False,
 ) -> pd.DataFrame:
+    """Run predictions for the last ``last_days`` dates.
+
+    Optional caching (used by the API layer): when ``cache`` (a duck-typed
+    predictions_database.Database) and ``config_hash`` are given, each date's
+    LLM prediction is read from / written to the cache keyed by
+    (config_hash, forecast_start_date). Only the prediction is cached — y_true is
+    recomputed downstream via add_y_true. ``force_recompute`` ignores cached reads
+    but still overwrites entries with fresh values. The module stays decoupled: it
+    only calls cache.get_cached_prediction / cache.upsert_prediction if provided.
+    """
     end_date = datetime.strptime(config["forecast_start_date"], "%Y-%m-%d")
     print(f"FORECAST_DATE: {end_date}")
 
@@ -185,6 +198,30 @@ def make_prediction_for_last_N_days(
     if save_results and save_path:
         Path(save_path).unlink(missing_ok=True)
 
+    cache_enabled = cache is not None and bool(config_hash)
+
+    # Ordered list of dates this run must produce (newest first, как раньше).
+    forecast_dates = [
+        (end_date - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(last_days)
+    ]
+
+    # Resolve cache hits up front: if every requested date is already cached we can
+    # skip the heavy SharedBaseDataCache/CoinGlass build entirely. force_recompute
+    # ignores existing entries but still overwrites them with fresh values below.
+    cached_rows: dict[str, dict] = {}
+    if cache_enabled and not force_recompute:
+        for d in forecast_dates:
+            hit = cache.get_cached_prediction(config_hash, d)
+            if hit is not None:
+                cached_rows[d] = hit
+        if cached_rows:
+            print(
+                f"[predictions] Cache: {len(cached_rows)}/{len(forecast_dates)} "
+                f"dates served from cache (config {config_hash})"
+            )
+
+    missing_dates = [d for d in forecast_dates if d not in cached_rows]
+
     active_agents = set(config.get("agent_envolved_in_prediction", []))
 
     # Agents which use tech indicators
@@ -192,15 +229,16 @@ def make_prediction_for_last_N_days(
         "agent_for_analysing_tech_indicators",
         "agent_for_analysing_onchain_indicators",
     }
-    
-    # Check if we need ddataset for this launch
-    needs_dataset = bool(_DATASET_AGENTS & active_agents)
+
+    # Build the shared dataset only when a dataset-dependent agent has at least one
+    # date that is NOT already cached — all-hits runs never touch CoinGlass.
+    needs_dataset = bool(_DATASET_AGENTS & active_agents) and bool(missing_dates)
     cached_dataset: pd.DataFrame | None = None
     if needs_dataset:
         api_key = os.environ["COINGLASS_API_KEY"]
         print("[predictions] Building SharedBaseDataCache...")
-        cache = SharedBaseDataCache(api_key=api_key)
-        cached_dataset = cache.get_base_df()
+        base_cache = SharedBaseDataCache(api_key=api_key)
+        cached_dataset = base_cache.get_base_df()
         if cached_dataset is None or cached_dataset.empty:
             raise RuntimeError(
                 "[predictions] SharedBaseDataCache returned empty dataframe."
@@ -209,16 +247,23 @@ def make_prediction_for_last_N_days(
             f"[predictions] SharedBaseDataCache loaded: {cached_dataset.shape} "
             f"({cached_dataset['date'].min().date()} → {cached_dataset['date'].max().date()})"
         )
+    elif not missing_dates:
+        print("[predictions] All requested dates served from cache — skipping CoinGlass fetch")
     else:
         print("[predictions] No dataset-dependent agents — skipping CoinGlass fetch")
 
     rows = []
     with _batch_trace(config, last_days):
-        for i in range(last_days):
-            forecast_date = (end_date - timedelta(days=i)).strftime("%Y-%m-%d")
+        for i, forecast_date in enumerate(forecast_dates):
             print(f"\n{'='*60}")
             print(f"[predictions] Day {i + 1}/{last_days} — forecast_date={forecast_date}")
             print(f"{'='*60}")
+
+            cached_row = cached_rows.get(forecast_date)
+            if cached_row is not None:
+                print(f"[predictions] CACHE HIT — {forecast_date}")
+                rows.append(cached_row)
+                continue
 
             print("DATE PREDICT:", forecast_date)
             row = make_one_prediction(
@@ -230,6 +275,9 @@ def make_prediction_for_last_N_days(
                 save_path=save_path,
                 debug_run_dir=debug_run_dir,
             )
+
+            if cache_enabled:
+                cache.upsert_prediction(config_hash, config, forecast_date, row)
 
             rows.append(row)
 

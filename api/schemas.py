@@ -136,6 +136,13 @@ class MultiagentPredictionsRequest(BaseModel):
         le=365,
         description="Number of last eligible dates to evaluate",
     )
+    force_recompute: bool = Field(
+        default=False,
+        description=(
+            "Bypass the predictions cache and recompute every date with the LLM. "
+            "Freshly computed dates are still written back to the cache."
+        ),
+    )
 
     @field_validator("forecast_start_date")
     @classmethod
@@ -368,3 +375,56 @@ class TwitterCookiesUploadResponse(BaseModel):
     saved: int = Field(..., description="Number of cookies written to twitter_cookies.json")
     session_cookies_ok: bool = Field(..., description="auth_token and ct0 are present in the uploaded cookies")
     cookies_path: str
+
+
+# --- Predictions cache -----------------------------------------------------
+
+
+class CachePredictionCacheSettings(BaseModel):
+    """Settings for the predictions cache (cached_configs_predictions.db).
+
+    Persisted to configs/cache_settings.json (built into the image). The default
+    for save_n_last_days is seeded from the CACHED_PREDICTIONS_SAVE_N_LAST_DAYS
+    env var (dev.env) when the JSON file is absent.
+    """
+
+    save_n_last_days: int = Field(
+        default=30,
+        ge=1,
+        le=3650,
+        description=(
+            "Retention window: cached predictions with forecast_start_date older "
+            "than today(UTC) - save_n_last_days are pruned (applies to all configs)."
+        ),
+    )
+
+
+class ChangeCachePredictionCacheSettingsRequest(BaseModel):
+    """Partial update for the predictions cache settings — send only fields to change."""
+
+    model_config = ConfigDict(json_schema_extra={"example": {"save_n_last_days": 30}})
+
+    save_n_last_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class CacheConfigInfo(BaseModel):
+    config_hash: str = Field(..., description="16-hex config identity (sha256 of prediction-determining fields)")
+    cached_dates_count: int = Field(..., description="Number of cached forecast dates for this config")
+    oldest_date: str | None = Field(None, description="MIN(forecast_start_date) in cache for this config")
+    newest_date: str | None = Field(None, description="MAX(forecast_start_date) in cache for this config")
+    created_at: str | None = Field(None, description="When this config was first cached (ISO 8601, UTC)")
+
+
+class CacheConfigsResponse(BaseModel):
+    total_configs: int
+    configs: list[CacheConfigInfo]
+
+
+class CacheClearResponse(BaseModel):
+    cleared: bool = Field(..., description="True if anything was deleted")
+    dropped_configs: int | None = Field(None, description="Number of config tables dropped (whole-DB reset)")
+    detail: str
+
+
+class CacheHashResponse(BaseModel):
+    config_hash: str = Field(..., description="config_hash computed for the supplied config body")
