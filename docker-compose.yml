@@ -9,12 +9,18 @@
 #
 # Рядом с этим файлом должны лежать:
 #   dev.env, news_archive.db, calendar_archive.db,
-#   twitter_archive.db, chrome_profile/
+#   twitter_archive.db, cached_configs_predictions.db, chrome_profile/
+#
+# cached_configs_predictions.db НЕ вшита в образ — положите файл рядом с этим
+# docker-compose.yml перед запуском. Если файла нет, создайте пустой: контейнер
+# при старте сам инициализирует схему (CREATE TABLE IF NOT EXISTS).
+#   Windows: New-Item cached_configs_predictions.db -ItemType File
+#   Linux:   touch cached_configs_predictions.db
 # =========================================================
 
 services:
   btc-predictor:
-    image: danilacrazy1337/multiagent_system:v1.0
+    image: danilacrazy1337/multiagent_system:v2.0-CachingPredictions
     env_file: ./dev.env
     ports:
       - "8080:8080"
@@ -22,5 +28,6 @@ services:
       - ./news_archive.db:/app/MultiagentSystem/agents/news_analyser/news_archive.db
       - ./calendar_archive.db:/app/MultiagentSystem/agents/economic_calendar_analyser/calendar_archive.db
       - ./twitter_archive.db:/app/MultiagentSystem/agents/twitter_analyser/twitter_archive.db
+      - ./cached_configs_predictions.db:/app/Database_of_cached_results_for_predictions/cached_configs_predictions.db
       - ./chrome_profile:/app/MultiagentSystem/agents/twitter_analyser/twitter_scrapper/chrome_profile
     restart: unless-stopped

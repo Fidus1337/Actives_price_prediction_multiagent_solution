@@ -41,6 +41,9 @@ COPY api/ ./api/
 COPY MultiagentSystem/ ./MultiagentSystem/
 COPY configs/ ./configs/
 COPY Logs/LoggingSystem/ ./Logs/LoggingSystem/
+# Predictions-cache package: ships the Python module only — the .db itself is
+# excluded by .dockerignore (**/*.db) and bind-mounted from next to docker-compose.yml.
+COPY Database_of_cached_results_for_predictions/ ./Database_of_cached_results_for_predictions/
 
 EXPOSE 8080
 
