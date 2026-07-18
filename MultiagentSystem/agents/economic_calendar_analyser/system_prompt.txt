@@ -22,5 +22,7 @@ Return strict JSON:
 {{
   "direction": "bullish" | "bearish" | "neutral",
   "confidence": "high" | "medium" | "low",
-  "reasoning": "2-3 sentences explaining which events dominate and why"
+  "reasoning": "2-3 sentences explaining which events dominate and why",
+  "summary": "1-2 sentence plain-language summary of the macro backdrop and its BTC implication",
+  "risks": "1-2 sentences on what could invalidate this call (upcoming data, conflicting or noisy signals)"
 }}

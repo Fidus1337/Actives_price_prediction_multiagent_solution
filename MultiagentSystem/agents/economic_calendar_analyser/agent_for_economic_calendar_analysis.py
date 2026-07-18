@@ -32,6 +32,8 @@ class CalendarVerdict(BaseModel):
     direction: Literal["bullish", "bearish", "neutral"]
     confidence: Literal["high", "medium", "low"]
     reasoning: str = Field(description="2-3 sentences explaining which events dominate and why")
+    summary: str = Field(description="1-2 sentence plain-language summary of the macro backdrop and its BTC implication")
+    risks: str = Field(description="1-2 sentences on what could invalidate this call (upcoming data, conflicting signals)")
 
 
 # -- Helpers -------------------------------------------------------------------
@@ -147,6 +149,8 @@ def _save_prediction_debug(
             "direction": verdict.direction,
             "confidence": verdict.confidence,
             "reasoning": verdict.reasoning,
+            "summary": verdict.summary,
+            "risks": verdict.risks,
         } if verdict else None,
     }
     (AGENT_DIR / "calendar_predict.json").write_text(
@@ -318,15 +322,18 @@ def agent_for_economic_calendar_analysis(state: AgentState):
     print(f"{LOG_TAG}   calendar_predict.json saved")
 
     # --- Build agent signal ---
-    summary = (
-        f"{len(filtered)} macro events analyzed. "
-        f"LLM verdict: {final_direction}, confidence: {final_confidence}."
-    )
+    summary = f"{len(filtered)} macro events analyzed. {verdict.summary}"
+    risks = verdict.risks
+    if final_direction != verdict.direction:
+        risks = (
+            f"{risks} Note: LLM called {verdict.direction}, but the signal was downgraded to "
+            f"{final_direction} due to a small and conflicting event sample."
+        ).strip()
 
     return {"agent_signals": {AGENT_NAME: {
         "reasoning": verdict.reasoning,
         "summary": summary,
-        "risks": "",
+        "risks": risks,
         "prediction": prediction,
         "confidence": confidence,
         "description_of_the_reports_problem": [],

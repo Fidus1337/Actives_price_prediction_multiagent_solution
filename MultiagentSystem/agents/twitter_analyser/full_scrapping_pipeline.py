@@ -68,6 +68,7 @@ def run_fetch_only(
     authors: list[str] | None = None,
     stop_on_existing_duplicates: bool = False,
     duplicates_threshold: int = 5,
+    exclude_retweets: bool = True,
 ) -> dict:
     """
     Parse tweets from configured accounts and save to SQLite archive.
@@ -84,6 +85,10 @@ def run_fetch_only(
     duplicates_threshold:
         Number of already-archived tweets after which fetching for the current
         source is aborted. Only used when stop_on_existing_duplicates is True.
+    exclude_retweets:
+        When True (default), retweets are dropped before saving. Since each
+        tracked author is scraped directly, retweets are redundant and would
+        double-count signals attributed to the original author.
     """
     init_db()
     config = _load_accounts_config()
@@ -155,6 +160,7 @@ def run_fetch_only(
                     max_scrolls=max_scrolls,
                     existing_tweet_ids=existing_ids,
                     duplicates_stop_threshold=dup_threshold,
+                    exclude_retweets=exclude_retweets,
                 )
             except Exception as exc:
                 print(f"{LOG_TAG} ERROR while fetching @{username}: {exc}")

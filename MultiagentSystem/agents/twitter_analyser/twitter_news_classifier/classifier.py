@@ -90,11 +90,11 @@ Critical rules:
      ("Bitcoin is a gift", "most bullish chart ever", "buy the dip",
      "Bitcoin has been declared dead 470 times") -> NO_CORRELATION_TO_BTC.
 2) Treat analytical opinions seriously — even short directional calls from
-   experienced analysts carry real market weight. Many tweets reference a chart
-   or image that you cannot see; if the text clearly implies a directional
-   conclusion ("breaking out", "support lost", "target hit"), treat the
-   visual evidence as present and classify accordingly. Do NOT downgrade to
-   NO_CORRELATION_TO_BTC just because no image text is visible.
+   experienced analysts carry real market weight. Many tweets include images
+   (charts, price screenshots, on-chain graphs) which are provided alongside
+   the text. Analyze both: visual confirmation of a breakout, support loss, or
+   key level matters as much as the caption. If the image shows a clear
+   directional pattern, classify accordingly even if the text is minimal.
 3) On-chain transfers: deposits TO exchanges = potential selling pressure (BEAR).
    Withdrawals FROM exchanges = accumulation (BULL).
    Transfers between unknown wallets = NO_CORRELATION_TO_BTC.
@@ -119,7 +119,8 @@ def _prepare_for_classification(tweets: list[dict]) -> list[dict]:
     prepared = []
     for t in tweets:
         text = (t.get("text") or "").strip()
-        prepared.append({
+        image_urls = [u for u in (t.get("image_urls") or []) if u]
+        item: dict = {
             "tweet_id": str(t.get("tweet_id", "")),
             "author": t.get("author_username", ""),
             "date": t.get("date", ""),
@@ -128,7 +129,10 @@ def _prepare_for_classification(tweets: list[dict]) -> list[dict]:
             "replies": int(t.get("replies", 0) or 0),
             "views": int(t.get("views", 0) or 0),
             "text": text[:500],
-        })
+        }
+        if image_urls:
+            item["image_urls"] = image_urls
+        prepared.append(item)
     return prepared
 
 
@@ -255,52 +259,76 @@ def classify_tweets(
             print(f"{LOG_TAG} Batch {global_batch_id} ...")
 
             try:
-                payload = json.dumps(batch, ensure_ascii=False)  # Serialize tweet(s) to JSON string
+                payload = json.dumps(batch, ensure_ascii=False)
+                text_msg = f"Classify these {len(batch)} tweets:\n{payload}"
 
-                # Send to LLM and force the response into TweetClassificationResponse schema
-                result = cast(
-                    TweetClassificationResponse,
-                    llm.with_structured_output(TweetClassificationResponse).invoke([
-                        SystemMessage(content=classifier_prompt),           # System rules for classification
-                        HumanMessage(content=f"Classify these {len(batch)} tweets:\n{payload}"),  # The tweet data
-                    ]),
-                )
+                # Collect image URLs from current batch (batch_size=1, so all images
+                # belong to the same tweet — no attribution ambiguity).
+                batch_image_urls = [
+                    url for item in batch for url in (item.get("image_urls") or [])
+                ]
+
+                if batch_image_urls:
+                    human_content: list = [{"type": "text", "text": text_msg}]
+                    for url in batch_image_urls:
+                        human_content.append({"type": "image_url", "image_url": {"url": url}})
+                    human_msg = HumanMessage(content=human_content)
+                    print(f"{LOG_TAG} Batch {global_batch_id}: vision ({len(batch_image_urls)} image(s))")
+                else:
+                    human_msg = HumanMessage(content=text_msg)
+
+                def _invoke_llm(msg: HumanMessage) -> TweetClassificationResponse:
+                    return cast(
+                        TweetClassificationResponse,
+                        llm.with_structured_output(TweetClassificationResponse).invoke([
+                            SystemMessage(content=classifier_prompt),
+                            msg,
+                        ]),
+                    )
+
+                try:
+                    result = _invoke_llm(human_msg)
+                except Exception as vision_err:
+                    # If failure looks image-related, retry with text-only
+                    err_lower = str(vision_err).lower()
+                    if batch_image_urls and any(k in err_lower for k in ("image", "url", "media", "download")):
+                        print(f"{LOG_TAG} Batch {global_batch_id}: image error, retrying text-only: {vision_err}")
+                        result = _invoke_llm(HumanMessage(content=text_msg))
+                    else:
+                        raise
 
                 # Build a lookup: tweet_id -> TweetItem (from LLM response)
                 mapped = {item.tweet_id: item for item in result.classifications}
 
                 # Write classification results back into the original tweet dicts
                 for item in batch:
-                    tw = by_id.get(item["tweet_id"])   # Get the original dict from the input list
+                    tw = by_id.get(item["tweet_id"])
                     if tw is None:
-                        continue                        # Should not happen, safety guard
+                        continue
 
                     idx = idx_by_id.get(item["tweet_id"], 0)
-                    cls = mapped.get(item["tweet_id"]) # Look up what the LLM returned for this tweet
+                    cls = mapped.get(item["tweet_id"])
 
                     if cls is None:
-                        # LLM returned a response but omitted this tweet_id — fallback to neutral
                         tw["signal_type"] = "NO_CORRELATION_TO_BTC"
                         tw["signal_confidence"] = "LOW"
                         _log_classification(idx, total, tw, reason="missing_llm_item_fallback")
                     else:
-                        # Happy path: write LLM classification into the original dict (in-place)
                         tw["signal_type"] = cls.signal_type
                         tw["signal_confidence"] = cls.confidence
                         _log_classification(idx, total, tw, reason="llm")
 
             except Exception as e:
-                # LLM call failed entirely (network error, parsing error, etc.)
                 print(f"{LOG_TAG} ERROR batch {global_batch_id}: {e}")
                 if strict:
-                    raise RuntimeError(...) from e     # Propagate if caller wants hard failure
+                    raise RuntimeError(str(e)) from e
 
-                # Otherwise fallback: mark every tweet in the failed batch as neutral
                 for item in batch:
                     tw = by_id.get(item["tweet_id"])
                     if tw is not None:
                         tw["signal_type"] = "NO_CORRELATION_TO_BTC"
                         tw["signal_confidence"] = "LOW"
-                        _log_classification(idx, total, tw, reason="batch_error_fallback")
+                        item_idx = idx_by_id.get(item["tweet_id"], 0)
+                        _log_classification(item_idx, total, tw, reason="batch_error_fallback")
 
         running_offset += len(date_items)  # Track position across dates for accurate log counters

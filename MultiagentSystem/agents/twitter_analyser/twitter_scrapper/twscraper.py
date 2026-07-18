@@ -34,11 +34,13 @@ LOG_TAG = "[twitter_selenium]"
 
 _ARTICLE_SELECTOR = 'article[data-testid="tweet"]'
 _TWEET_TEXT_SELECTOR = 'div[data-testid="tweetText"]'
+_TWEET_PHOTO_SELECTOR = 'div[data-testid="tweetPhoto"] img'
 _SOCIAL_CONTEXT_SELECTOR = 'span[data-testid="socialContext"]'
 _NO_NEW_THRESHOLD = 5
 _SCROLL_WAIT_BASE = 2.0
 _SCROLL_WAIT_MAX = 8.0
 _PAGE_LOAD_RETRIES = 3
+_MAX_IMAGES_PER_TWEET = 4
 
 
 def _parse_count(text: str) -> int:
@@ -125,9 +127,18 @@ def _extract_tweet_text(article) -> str:
     container = text_el[0]
 
     try:
-        children = container.find_elements(By.XPATH, ".//span | .//a | .//img")
+        # Use only leaf-level text nodes and images to avoid doubling text from
+        # nested spans (e.g. outer <span> wrapping inner <span>Hello</span>).
+        # Leaf spans: spans that contain no child span or anchor.
+        leaf_spans = container.find_elements(
+            By.XPATH, ".//span[not(.//span) and not(.//a)]"
+        )
+        anchors = container.find_elements(By.XPATH, ".//a")
+        images = container.find_elements(By.XPATH, ".//img")
+        children = leaf_spans + anchors + images
         if children:
             parts: list[str] = []
+            seen_texts: set[str] = set()
             for child in children:
                 tag = child.tag_name
                 if tag == "img":
@@ -136,8 +147,9 @@ def _extract_tweet_text(article) -> str:
                         parts.append(alt)
                     continue
                 child_text = child.text
-                if child_text:
+                if child_text and child_text not in seen_texts:
                     parts.append(child_text)
+                    seen_texts.add(child_text)
             assembled = " ".join(parts)
             assembled = re.sub(r"\s{2,}", " ", assembled).strip()
             if assembled:
@@ -149,6 +161,34 @@ def _extract_tweet_text(article) -> str:
         return container.text.strip()
     except Exception:
         return ""
+
+
+def _extract_tweet_images(article) -> list[str]:
+    """Extract public CDN image URLs from a tweet article element.
+
+    Returns up to _MAX_IMAGES_PER_TWEET URLs (pbs.twimg.com only).
+    Upgrades thumbnails to 'large' format for better chart readability.
+    Video thumbnails and link-card preview images are intentionally excluded —
+    only actual tweet photo uploads are captured.
+    """
+    urls: list[str] = []
+    try:
+        imgs = article.find_elements(By.CSS_SELECTOR, _TWEET_PHOTO_SELECTOR)
+        for img in imgs[:_MAX_IMAGES_PER_TWEET]:
+            src = img.get_attribute("src") or ""
+            if not src.startswith("https://pbs.twimg.com/"):
+                continue
+            # Upgrade resolution: replace any existing name= param with large
+            if "name=" in src:
+                src = re.sub(r"name=\w+", "name=large", src)
+            elif "?" in src:
+                src += "&name=large"
+            else:
+                src += "?name=large"
+            urls.append(src)
+    except Exception:
+        pass
+    return urls
 
 
 def _is_retweet(article, username: str) -> tuple[bool, str]:
@@ -217,12 +257,16 @@ def _extract_tweets_from_page(driver: uc.Chrome, username: str) -> list[dict]:
             _expand_show_more(driver, article)
 
             text = _extract_tweet_text(article)
+            image_urls = _extract_tweet_images(article)
 
             is_rt, author_username = _is_retweet(article, username)
 
-            display_name = ""
             if not is_rt:
                 author_username = username
+
+            # For retweets the User-Name block shows the original author,
+            # not the retweeting account, so display_name is always correct.
+            display_name = ""
             user_name_el = article.find_elements(
                 By.CSS_SELECTOR, 'div[data-testid="User-Name"] span'
             )
@@ -259,6 +303,7 @@ def _extract_tweets_from_page(driver: uc.Chrome, username: str) -> list[dict]:
                 "is_reply": False,
                 "lang": "",
                 "url": tweet_url,
+                "image_urls": image_urls,
             }
             tweets.append(tweet_dict)
 
@@ -341,6 +386,7 @@ def fetch_tweets_sync(
     max_scrolls: int = 100,
     existing_tweet_ids: set[str] | None = None,
     duplicates_stop_threshold: int | None = None,
+    exclude_retweets: bool = False,
 ) -> list[dict]:
     """Fetch recent tweets from a Twitter user profile.
 
@@ -358,6 +404,10 @@ def fetch_tweets_sync(
             scrolling once this many already-archived tweet_ids have been seen
             CONSECUTIVELY (the counter resets whenever a new in-range tweet is
             collected, so a stray duplicate among fresh tweets won't abort).
+        exclude_retweets: When True, skip retweets (is_retweet=True). Original tweets
+            are always collected directly from the original author's timeline, so
+            retweets on other accounts' timelines are redundant and distort signal
+            attribution.
 
     Returns:
         List of tweet dicts ready for archiving.
@@ -406,11 +456,15 @@ def fetch_tweets_sync(
                     continue
                 seen_ids.add(t["tweet_id"])
 
+                if exclude_retweets and t.get("is_retweet"):
+                    continue
+
                 if since_date and t["date"] and t["date"] < since_date:
                     old_count += 1
                     continue
 
                 if until_date and t["date"] and t["date"] > until_date:
+                    old_count += 1
                     continue
 
                 if dup_stop_enabled and t["tweet_id"] in existing_tweet_ids:

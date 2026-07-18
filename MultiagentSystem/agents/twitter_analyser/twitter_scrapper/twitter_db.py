@@ -5,6 +5,7 @@ Single-file database, ready for Docker volume mounting.
 DB path configurable via TWITTER_DB_PATH env variable.
 """
 
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -31,7 +32,8 @@ CREATE TABLE IF NOT EXISTS tweets (
     lang                TEXT,
     url                 TEXT,
     signal_type         TEXT,
-    signal_confidence   TEXT
+    signal_confidence   TEXT,
+    image_urls          TEXT
 );
 """
 
@@ -55,11 +57,13 @@ def init_db() -> None:
         # Backward-compatible migration for existing DB files.
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(tweets)").fetchall()}
         
-        # Adding signal_type and signal_confidence columns
-        if "signal_type" not in cols:
-            conn.execute("ALTER TABLE tweets ADD COLUMN signal_type TEXT")
-        if "signal_confidence" not in cols:
-            conn.execute("ALTER TABLE tweets ADD COLUMN signal_confidence TEXT")
+        for col, definition in (
+            ("signal_type", "TEXT"),
+            ("signal_confidence", "TEXT"),
+            ("image_urls", "TEXT"),
+        ):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE tweets ADD COLUMN {col} {definition}")
 
 
 def insert_tweets(tweets: list[dict]) -> int:
@@ -71,14 +75,15 @@ def insert_tweets(tweets: list[dict]) -> int:
         return 0
     normalized = []
     
-    # The tweet must be with the signal and confidance keys
     for t in tweets:
         item = dict(t)
         item.setdefault("signal_type", None)
         item.setdefault("signal_confidence", None)
+        # Serialize image_urls list → JSON string for storage
+        raw_urls = item.get("image_urls")
+        item["image_urls"] = json.dumps(raw_urls) if isinstance(raw_urls, list) else (raw_urls or None)
         normalized.append(item)
-    
-    # For every tweet add columns
+
     with _get_conn() as conn:
         before = conn.execute("SELECT COUNT(*) FROM tweets").fetchone()[0]
         conn.executemany(
@@ -86,11 +91,13 @@ def insert_tweets(tweets: list[dict]) -> int:
             INSERT OR IGNORE INTO tweets
                 (tweet_id, author_username, author_display_name, text,
                  created_at, date, likes, retweets, replies, views,
-                 is_retweet, is_reply, lang, url, signal_type, signal_confidence)
+                 is_retweet, is_reply, lang, url, signal_type, signal_confidence,
+                 image_urls)
             VALUES
                 (:tweet_id, :author_username, :author_display_name, :text,
                  :created_at, :date, :likes, :retweets, :replies, :views,
-                 :is_retweet, :is_reply, :lang, :url, :signal_type, :signal_confidence)
+                 :is_retweet, :is_reply, :lang, :url, :signal_type, :signal_confidence,
+                 :image_urls)
             """,
             normalized,
         )
@@ -244,6 +251,17 @@ def get_tweet_ids_by_author_in_range(
     return {row["tweet_id"] for row in rows if row["tweet_id"]}
 
 
+def _deserialize_tweet(row: sqlite3.Row) -> dict:
+    """Convert a DB row to a tweet dict, deserializing JSON fields."""
+    d = dict(row)
+    raw = d.get("image_urls")
+    try:
+        d["image_urls"] = json.loads(raw) if raw else []
+    except (json.JSONDecodeError, TypeError):
+        d["image_urls"] = []
+    return d
+
+
 def get_tweets_in_range(dt_from: datetime, dt_to: datetime) -> list[dict]:
     """Return tweets within [dt_from, dt_to], newest first.
 
@@ -256,7 +274,7 @@ def get_tweets_in_range(dt_from: datetime, dt_to: datetime) -> list[dict]:
             "SELECT * FROM tweets WHERE date >= ? AND date <= ? ORDER BY created_at DESC",
             (from_str, to_str),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_deserialize_tweet(r) for r in rows]
 
 
 # Auto-init on import

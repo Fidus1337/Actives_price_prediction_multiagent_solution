@@ -81,11 +81,27 @@ def _choose_batch_size(total_articles: int) -> int:
     return 30
 
 
+def _stable_article_id(item: dict, idx: int) -> str:
+    """Return a stable identifier for an article.
+
+    Prefers the DB integer primary key; falls back to a short hash of
+    (title, release_time) so the ID does not change between batches.
+    """
+    db_id = item.get("id")
+    if db_id is not None:
+        return str(db_id)
+    title = str(item.get("article_title") or "")
+    ts = str(item.get("article_release_time") or "")
+    import hashlib
+    return "h_" + hashlib.md5(f"{title}|{ts}".encode()).hexdigest()[:12]
+
+
 def _prepare_for_classification(articles: list[dict]) -> list[dict]:
     """Format archive articles into LLM input format.
 
-    Each article gets an article_id based on its index and
-    content truncated to 500 chars.
+    Each article gets a stable article_id (DB primary key or content hash)
+    so LLM response mismatches can be detected reliably.
+    Content is truncated to 500 chars.
     """
     prepared = []
     for idx, item in enumerate(articles):
@@ -95,7 +111,7 @@ def _prepare_for_classification(articles: list[dict]) -> list[dict]:
         # Content may already be stripped (from archive) or raw HTML (from API)
         content = strip_html(raw_content) if "<" in raw_content else raw_content
         prepared.append({
-            "article_id": f"news_{idx}",
+            "article_id": _stable_article_id(item, idx),
             "date": date_str,
             "title": item.get("article_title", "—"),
             "source": item.get("source_name", "—"),
@@ -162,7 +178,7 @@ def _classify_batch(
                 article["strength"] = None
 
 
-def classify_articles(articles: list[dict]) -> None:
+def classify_articles(articles: list[dict], model: str = "gpt-4o-mini") -> None:
     """Classify articles in-place, adding 'category' and 'strength' fields.
 
     Articles are grouped by date before batching so the LLM never sees
@@ -172,13 +188,14 @@ def classify_articles(articles: list[dict]) -> None:
     Args:
         articles: list of archive-format article dicts.
                   Modified in-place: each dict gets 'category' and 'strength' keys.
+        model: OpenAI model name to use for classification (default: gpt-4o-mini).
 
     On per-batch failure: marks articles as category='unclassified', strength=None.
     """
     if not articles:
         return
 
-    classifier_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+    classifier_llm = ChatOpenAI(model=model, temperature=0.0)
 
     date_groups = _group_by_date(articles)
     batch_counter = 0
